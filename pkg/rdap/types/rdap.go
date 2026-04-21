@@ -144,12 +144,16 @@ type IPAddresses struct {
 	V6 []string `json:"v6,omitempty"`
 }
 
-// Entity per RFC 9083 §5.1. Contact information uses JSContact (RFC 9553)
-// carried in the jscard member per draft-ietf-regext-rdap-jscontact.
+// Entity per RFC 9083 §5.1. Contact information is carried in the
+// JSContact Card (`jscard`) per draft-ietf-regext-rdap-jscontact, with
+// an optional jCard projection (`vcardArray`, RFC 7095) for clients
+// and conformance tools on the ICANN side of the migration. Emitting
+// both gives maximum compatibility.
 type Entity struct {
 	Common
 	Roles        []string        `json:"roles,omitempty"`
 	JSCard       *jscontact.Card `json:"jscard,omitempty"`
+	VCardArray   []any           `json:"vcardArray,omitempty"`
 	PublicIDs    []PublicID      `json:"publicIds,omitempty"`
 	AsEventActor []Event         `json:"asEventActor,omitempty"`
 	Entities     []Entity        `json:"entities,omitempty"`

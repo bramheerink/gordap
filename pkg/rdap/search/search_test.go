@@ -11,11 +11,25 @@ func TestMatchPattern(t *testing.T) {
 		in, pat string
 		want    bool
 	}{
+		// Strict equality
 		{"example.nl", "example.nl", true},
+		{"example.nl", "example.com", false},
+
+		// Prefix wildcard (trailing *) — RFC 7482 conformant
 		{"example.nl", "example.*", true},
 		{"example.nl", "ex*", true},
 		{"other.nl", "ex*", false},
-		{"example.nl", "example.com", false},
+
+		// Suffix wildcard (leading *) — RIR extension
+		{"ns1.example.nl", "*.nl", true},
+		{"ns1.example.nl", "*example.nl", true},
+		{"example.com", "*.nl", false},
+
+		// Infix wildcard (both) — registry extension
+		{"ns1.example.nl", "*example*", true},
+		{"other.com", "*example*", false},
+
+		// Match-any
 		{"", "*", true},
 		{"anything", "*", true},
 	}

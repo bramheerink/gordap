@@ -40,7 +40,10 @@ func NewRouter(s *Server, verifier auth.Verifier) http.Handler {
 		writeError(w, http.StatusNotFound, "Unknown RDAP path", s.Notices)
 	})
 
-	return auth.Middleware(verifier)(mux)
+	// Response cache goes inside auth (so Claims are on the context
+	// when we compute the tier-specific key) and around the mux (so
+	// it observes the final rendered body).
+	return auth.Middleware(verifier)(responseCacheMiddleware(s.ResponseCache)(mux))
 }
 
 // helpResponse implements /help per RFC 9082 §3.1.6 plus the

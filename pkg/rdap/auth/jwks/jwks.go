@@ -31,11 +31,16 @@ import (
 
 // Config controls a Verifier. All fields except IssuerURL are optional.
 type Config struct {
-	JWKSURL   string        // https://issuer/.well-known/jwks.json
-	Issuer    string        // expected `iss` claim; empty to skip check
-	Audience  string        // expected `aud` claim; empty to skip check
+	JWKSURL      string        // https://issuer/.well-known/jwks.json
+	Issuer       string        // expected `iss` claim; empty to skip check
+	Audience     string        // expected `aud` claim; empty to skip check
 	RefreshEvery time.Duration // JWKS cache TTL; default 10 min
-	HTTPClient *http.Client  // default http.Client with 10s timeout
+	HTTPClient   *http.Client  // default http.Client with 10s timeout
+
+	// ClockSkew widens the exp/nbf acceptance window. Federated IdPs
+	// regularly drift 1-3 seconds from wall-clock; without leeway that
+	// drift becomes spurious 401s. Default 30s when zero.
+	ClockSkew time.Duration
 
 	// ScopeMap maps individual scope strings to the tier they grant.
 	// The highest tier the token claims wins. Unknown scopes are
@@ -48,9 +53,11 @@ type Verifier struct {
 	cfg    Config
 	client *http.Client
 
-	mu         sync.RWMutex
-	keys       map[string]crypto.PublicKey
-	nextFetch  time.Time
+	mu        sync.RWMutex
+	keys      map[string]crypto.PublicKey
+	nextFetch time.Time
+
+	replay *replayCache
 }
 
 // New constructs a Verifier. The JWKS is fetched lazily on the first
@@ -59,11 +66,14 @@ func New(cfg Config) *Verifier {
 	if cfg.RefreshEvery <= 0 {
 		cfg.RefreshEvery = 10 * time.Minute
 	}
+	if cfg.ClockSkew <= 0 {
+		cfg.ClockSkew = 30 * time.Second
+	}
 	client := cfg.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
-	return &Verifier{cfg: cfg, client: client}
+	return &Verifier{cfg: cfg, client: client, replay: newReplayCache()}
 }
 
 // Verify parses, signature-checks and claim-validates a JWT. On
@@ -130,22 +140,24 @@ func (v *Verifier) Verify(ctx context.Context, token string) (auth.Claims, error
 		return auth.Claims{}, fmt.Errorf("jwks: decode payload: %w", err)
 	}
 	var claims struct {
-		Sub   string  `json:"sub"`
-		Iss   string  `json:"iss"`
-		Aud   any     `json:"aud"` // string or []string per RFC 7519
-		Exp   int64   `json:"exp"`
-		Nbf   int64   `json:"nbf"`
-		Scope string  `json:"scope"`
+		Sub   string `json:"sub"`
+		Iss   string `json:"iss"`
+		Aud   any    `json:"aud"` // string or []string per RFC 7519
+		Exp   int64  `json:"exp"`
+		Nbf   int64  `json:"nbf"`
+		Jti   string `json:"jti"`
+		Scope string `json:"scope"`
 	}
 	if err := json.Unmarshal(payloadRaw, &claims); err != nil {
 		return auth.Claims{}, fmt.Errorf("jwks: parse payload: %w", err)
 	}
 
 	now := time.Now().Unix()
-	if claims.Exp > 0 && now >= claims.Exp {
+	skew := int64(v.cfg.ClockSkew.Seconds())
+	if claims.Exp > 0 && now > claims.Exp+skew {
 		return auth.Claims{}, errors.New("jwks: token expired")
 	}
-	if claims.Nbf > 0 && now < claims.Nbf {
+	if claims.Nbf > 0 && now+skew < claims.Nbf {
 		return auth.Claims{}, errors.New("jwks: token not yet valid")
 	}
 	if v.cfg.Issuer != "" && claims.Iss != v.cfg.Issuer {
@@ -153,6 +165,11 @@ func (v *Verifier) Verify(ctx context.Context, token string) (auth.Claims, error
 	}
 	if v.cfg.Audience != "" && !audContains(claims.Aud, v.cfg.Audience) {
 		return auth.Claims{}, errors.New("jwks: audience mismatch")
+	}
+	if claims.Jti != "" && claims.Exp > 0 {
+		if v.replay.check(claims.Jti, time.Unix(claims.Exp, 0)) {
+			return auth.Claims{}, errors.New("jwks: token replay detected")
+		}
 	}
 
 	scopes := strings.Fields(claims.Scope)

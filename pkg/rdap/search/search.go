@@ -9,6 +9,7 @@ package search
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/bramheerink/gordap/pkg/rdap/datasource"
 )
@@ -70,21 +71,41 @@ func (Null) SearchNameservers(context.Context, Query) (*Result[datasource.Namese
 	return nil, ErrNotImplemented
 }
 
-// MatchPattern reports whether haystack matches a simple RFC 7482-style
-// wildcard pattern (only trailing '*' is meaningful). Used by backend
-// implementations that don't have their own substring primitives.
+// MatchPattern reports whether haystack matches a simple wildcard
+// pattern with `*` at start, end, or both.
+//
+// RFC 7482 §4.1 only specifies the trailing-asterisk form, but every
+// production RIR (ARIN, RIPE NCC) and several ccTLDs (SIDN, DK Hostmaster)
+// advertise infix / suffix matching as a de-facto extension. Supporting
+// all three keeps us interoperable with what clients actually send.
+// Embedded '*' inside the literal portion is treated as an ordinary
+// character — only the two edges carry special meaning.
 func MatchPattern(haystack, pattern string) bool {
 	if pattern == "" {
 		return haystack == ""
 	}
-	if pattern[len(pattern)-1] == '*' {
-		prefix := pattern[:len(pattern)-1]
-		if len(haystack) < len(prefix) {
-			return false
-		}
-		return haystack[:len(prefix)] == prefix
+	hasPrefix := pattern[0] == '*'
+	hasSuffix := pattern[len(pattern)-1] == '*'
+
+	// Strip the edge wildcards to get the literal core.
+	core := pattern
+	if hasPrefix {
+		core = core[1:]
 	}
-	return haystack == pattern
+	if hasSuffix && len(core) > 0 {
+		core = core[:len(core)-1]
+	}
+
+	switch {
+	case hasPrefix && hasSuffix:
+		return strings.Contains(haystack, core)
+	case hasPrefix:
+		return strings.HasSuffix(haystack, core)
+	case hasSuffix:
+		return strings.HasPrefix(haystack, core)
+	default:
+		return haystack == pattern
+	}
 }
 
 // ClampLimit returns a sane page size. An operator can pick a ceiling

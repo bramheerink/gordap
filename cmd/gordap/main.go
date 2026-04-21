@@ -43,16 +43,21 @@ func main() {
 		jwksAudience    = flag.String("jwks-audience", "", "expected audience (empty = don't check)")
 		enableBootstrap = flag.Bool("bootstrap", false, "consult IANA bootstrap for redirects")
 		bootstrapEvery  = flag.Duration("bootstrap-refresh", 24*time.Hour, "bootstrap refresh interval")
-		readHeaderTimeo = flag.Duration("read-header-timeout", 5*time.Second, "header read timeout")
+		readHeaderTimeo = flag.Duration("read-header-timeout", 5*time.Second, "header read timeout (slowloris guard)")
+		readTimeo       = flag.Duration("read-timeout", 15*time.Second, "full request read timeout")
+		writeTimeo      = flag.Duration("write-timeout", 30*time.Second, "response write timeout")
+		idleTimeo       = flag.Duration("idle-timeout", 120*time.Second, "keepalive idle timeout")
 		shutdownTimeo   = flag.Duration("shutdown-timeout", 15*time.Second, "graceful shutdown window")
 		requestTimeout  = flag.Duration("request-timeout", 10*time.Second, "per-request context timeout")
 		maxBodyBytes    = flag.Int64("max-body-bytes", 4<<10, "max request body")
 		rateLimitRPS    = flag.Float64("rate-limit-rps", 50, "per-client-IP sustained rate (0 disables)")
 		rateLimitBurst  = flag.Float64("rate-limit-burst", 100, "per-client-IP burst capacity")
 		gzipMinSize     = flag.Int("gzip-min-size", 128, "compress responses larger than N bytes")
-		cacheSize       = flag.Int("cache-size", 50_000, "LRU capacity per object class (0 disables)")
-		cacheTTL        = flag.Duration("cache-ttl", 60*time.Second, "LRU TTL for positive results")
-		cacheNegTTL     = flag.Duration("cache-neg-ttl", 5*time.Second, "LRU TTL for NotFound results")
+		cacheSize       = flag.Int("cache-size", 50_000, "record LRU capacity per object class (0 disables)")
+		cacheTTL        = flag.Duration("cache-ttl", 60*time.Second, "record LRU TTL for positive results")
+		cacheNegTTL     = flag.Duration("cache-neg-ttl", 5*time.Second, "record LRU TTL for NotFound results")
+		respCacheSize   = flag.Int("response-cache-size", 50_000, "response cache capacity per tier (PII-safe; 0 disables)")
+		respCacheTTL    = flag.Duration("response-cache-ttl", 60*time.Second, "response cache TTL")
 		tlsCert         = flag.String("tls-cert", "", "TLS certificate file (enables HTTPS)")
 		tlsKey          = flag.String("tls-key", "", "TLS private key file")
 	)
@@ -95,7 +100,18 @@ func main() {
 		Logger:       logger,
 		SelfLinkBase: *selfLinkBase,
 	}
+	if *respCacheSize > 0 && *respCacheTTL > 0 {
+		server.ResponseCache = cache.NewResponseCache(*respCacheSize, *respCacheTTL)
+		logger.Info("response cache enabled",
+			slog.Int("size", *respCacheSize), slog.Duration("ttl", *respCacheTTL))
+	}
 	applyProfile(server, *icannGTLD, *tosURL, cfg.Profile.ExtraNotices)
+	if *icannGTLD {
+		// ICANN conformance tool still expects jCard on every entity.
+		// The JSContact card is emitted alongside for forward-compat.
+		server.EmitJCard = true
+		server.RedactionReason = "Data minimization per GDPR Art. 5(1)(c)"
+	}
 
 	if *enableBootstrap {
 		reg := bootstrap.New(nil)
@@ -124,7 +140,14 @@ func main() {
 	handler = middleware.SecurityHeaders()(handler)
 	handler = observability.AccessLog(logger)(handler)
 
-	srv := &http.Server{Addr: *addr, Handler: handler, ReadHeaderTimeout: *readHeaderTimeo}
+	srv := &http.Server{
+		Addr:              *addr,
+		Handler:           handler,
+		ReadHeaderTimeout: *readHeaderTimeo,
+		ReadTimeout:       *readTimeo,
+		WriteTimeout:      *writeTimeo,
+		IdleTimeout:       *idleTimeo,
+	}
 
 	go func() {
 		logger.Info("rdap server starting",

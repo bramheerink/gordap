@@ -29,6 +29,12 @@ type Options struct {
 	// every RFC 9537 marker. Typical values: "Data minimization per
 	// GDPR Art. 5(1)(c)".
 	RedactionReason string
+
+	// EmitJCard, when true, populates the `vcardArray` member on every
+	// entity alongside the JSContact `jscard`. Required by the ICANN
+	// RDAP profile v2.2 for gTLD operators; the JSContact-only path
+	// is fine for RIR / ccTLD deployments that have already moved on.
+	EmitJCard bool
 }
 
 // Domain converts a datasource.Domain into its RFC 9083 wire form.
@@ -145,6 +151,9 @@ func entityWithMarks(c datasource.Contact, opts Options) (types.Entity, []Redact
 	}
 	if card := buildCardFromView(c, view); card != nil {
 		e.JSCard = card
+		if opts.EmitJCard {
+			e.VCardArray = jscontact.ToJCard(card)
+		}
 	}
 	return e, view.Marks
 }
@@ -425,7 +434,7 @@ func registrarEntity(r *datasource.Registrar, opts Options) types.Entity {
 	// A minimal registrar card: only the organisation name and URL.
 	// Detail contact info belongs on the abuse sub-entity, not here.
 	if r.Name != "" {
-		e.JSCard = &jscontact.Card{
+		card := &jscontact.Card{
 			Version: "1.0",
 			Type:    "Card",
 			UID:     "urn:uuid:" + deterministicUID(r.Handle),
@@ -433,6 +442,10 @@ func registrarEntity(r *datasource.Registrar, opts Options) types.Entity {
 			Organizations: map[string]jscontact.Org{
 				"org": {Type: "Organization", Name: r.Name},
 			},
+		}
+		e.JSCard = card
+		if opts.EmitJCard {
+			e.VCardArray = jscontact.ToJCard(card)
 		}
 	}
 	if r.Abuse != nil {

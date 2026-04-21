@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/bramheerink/gordap/pkg/rdap/auth"
+	"github.com/bramheerink/gordap/pkg/rdap/cache"
 	"github.com/bramheerink/gordap/pkg/rdap/datasource"
 	"github.com/bramheerink/gordap/pkg/rdap/idn"
 	"github.com/bramheerink/gordap/pkg/rdap/mapper"
@@ -50,6 +51,21 @@ type Server struct {
 	// Notices is injected on every top-level response. Use
 	// pkg/rdap/profile.ICANNgTLDNotices for the ICANN-mandated set.
 	Notices []types.Notice
+
+	// EmitJCard forces jCard (vcardArray) emission alongside the
+	// JSContact jscard. Required by ICANN-contracted gTLD operators
+	// until the conformance tool fully accepts JSContact alone.
+	EmitJCard bool
+
+	// RedactionReason is attached to every RFC 9537 marker. A typical
+	// value is "Data minimization per GDPR Art. 5(1)(c)".
+	RedactionReason string
+
+	// ResponseCache, when non-nil, is a post-render response cache
+	// keyed by (object, id, access-tier). Unlike the record-level
+	// cache it holds already-redacted JSON, so no PII sits in the
+	// working set regardless of caller tier.
+	ResponseCache *cache.ResponseCache
 }
 
 func (s *Server) opts(r *http.Request) mapper.Options {
@@ -58,6 +74,8 @@ func (s *Server) opts(r *http.Request) mapper.Options {
 		SelfLinkBase:     s.SelfLinkBase,
 		ExtraConformance: s.ExtraConformance,
 		ExtraNotices:     s.Notices,
+		EmitJCard:        s.EmitJCard,
+		RedactionReason:  s.RedactionReason,
 	}
 }
 

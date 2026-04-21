@@ -75,12 +75,16 @@ func (rl *RateLimiter) Allow(k string) bool {
 	return true
 }
 
-// Middleware returns the http.Handler wrapper. The key function lets the
-// caller pick whatever keying strategy they want; the default in Handler
-// keys on the remote IP.
+// Middleware returns the http.Handler wrapper. The key function is
+// required — there is no safe default, because the obvious choice
+// (r.RemoteAddr) collapses every caller behind a load balancer into a
+// single bucket, turning one noisy client into a DoS against everyone
+// else on the same replica. Callers MUST pass either middleware.ClientIP
+// for direct-connect deployments, or a trusted-proxy extractor that
+// reads a validated forwarded-client-IP header.
 func (rl *RateLimiter) Middleware(key func(*http.Request) string) func(http.Handler) http.Handler {
 	if key == nil {
-		key = ClientIP
+		panic("ratelimit: key function is required; use middleware.ClientIP for direct deploys or a trusted-proxy extractor")
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

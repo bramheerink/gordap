@@ -186,6 +186,16 @@ func TestSecurityHeaders_Present(t *testing.T) {
 	}
 }
 
+func TestRateLimiter_Middleware_PanicsOnNilKey(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic when key function is nil")
+		}
+	}()
+	rl := NewRateLimiter(1, 1)
+	_ = rl.Middleware(nil)
+}
+
 func TestMaxRequestBody_RejectsLargePayload(t *testing.T) {
 	h := MaxRequestBody(10)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
