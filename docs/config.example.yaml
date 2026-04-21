@@ -1,0 +1,62 @@
+# gordap YAML configuration example
+# ---
+# All keys are optional. Any flag passed on the command line overrides
+# the corresponding YAML value, so this file is a safe place to store
+# defaults.
+
+addr: ":8080"
+database_url: "postgres://rdap:pw@localhost:5432/rdap?sslmode=require"
+self_link_base: "https://rdap.example.nl"
+
+# Graceful shutdown / timeouts
+request_timeout: 10s
+read_header_timeout: 5s
+shutdown_timeout: 15s
+
+# LRU cache (per object class)
+cache_size: 50000
+cache_ttl: 60s
+cache_neg_ttl: 5s
+
+# Rate limiting (per client IP, token-bucket). 0 disables.
+rate_limit_rps: 50
+rate_limit_burst: 100
+
+# Compression threshold (bytes)
+gzip_min_size: 128
+
+# Request-body cap (defense in depth — RDAP is GET-only)
+max_body_bytes: 4096
+
+# TLS — uncomment to serve HTTPS directly. Leave empty to terminate TLS
+# at your LB / reverse proxy.
+# tls_cert: /etc/gordap/cert.pem
+# tls_key:  /etc/gordap/key.pem
+
+# IANA bootstrap redirects (RFC 7484). Set to true for registrars that
+# should 302 unknown domains to the authoritative registry.
+bootstrap: false
+bootstrap_refresh: 24h
+
+# Deployment profile — injects the mandatory notices, conformance
+# identifiers, and self-links every top-level response must carry.
+profile:
+  icann_gtld: true
+  tos_url: "https://example.nl/rdap/terms"
+  extra_notices:
+    - title: "Data source"
+      description:
+        - "This server serves data from the .example registry."
+        - "Queries about unrelated zones will not yield results."
+
+# OIDC / JWKS verifier. Empty jwks_url disables bearer verification
+# (every caller is Anonymous).
+auth:
+  jwks_url: "https://idp.example.nl/.well-known/jwks.json"
+  issuer: "https://idp.example.nl"
+  audience: "rdap"
+  # Scope → tier mapping. Unknown scopes are ignored; the highest tier
+  # matched wins.
+  scope_map:
+    "rdap:privileged": privileged
+    "rdap:authenticated": authenticated

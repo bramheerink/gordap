@@ -1,0 +1,32 @@
+# Build output
+/bin/
+/gordap
+*.test
+
+# Go profiling / coverage
+*.prof
+*.out
+coverage.html
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local config + secrets
+/config.yaml
+/config.local.yaml
+/tls/
+*.pem
+*.key
+!testdata/*.pem
+!testdata/*.key
+
+# Docker / compose
+.env
+.env.local
