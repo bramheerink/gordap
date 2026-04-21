@@ -222,6 +222,14 @@ ICANN RDAP Conformance Tool against a booted gordap via Docker.
 Bug reports and PRs welcome. Please include a test case with every
 change. For non-trivial features, open an issue first to discuss scope.
 
+## Colophon
+
+This project was vibe-coded end-to-end with
+[Claude](https://www.anthropic.com/claude) over a handful of sessions,
+purely for fun. If you spot something wrong, awkward, or at odds with
+how real operators actually run RDAP — open an issue on GitHub.
+Feedback, critiques, and pull requests are all welcome.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
