@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -101,16 +103,73 @@ func (rl *RateLimiter) Middleware(key func(*http.Request) string) func(http.Hand
 	}
 }
 
-// ClientIP is a best-effort key function: strips the port from RemoteAddr
-// and falls back to the raw RemoteAddr if parsing fails. Deployments
-// behind a proxy should supply their own key extracting the real client
-// IP from a trusted header (X-Forwarded-For, X-Real-IP).
+// ClientIP is the direct-connect key function: strips the port from
+// RemoteAddr and falls back to the raw RemoteAddr if parsing fails.
+// Deployments behind a proxy should use ForwardedClientIP instead —
+// ClientIP sees the proxy's IP, collapsing every caller into one bucket.
 func ClientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// ForwardedClientIP extracts the original client IP from X-Forwarded-For
+// or X-Real-IP, but ONLY when the immediate peer (RemoteAddr) is in the
+// trustedProxies allowlist. Untrusted peers fall back to ClientIP so an
+// attacker can't spoof their rate-limit key by forging the header.
+//
+// Trusted proxies are specified as CIDR prefixes — typical values
+// include 10.0.0.0/8 for an internal LB or the documented egress range
+// of your CDN (Cloudflare publishes one, Fastly another). Bare IPs
+// work too; they're accepted as /32 or /128.
+//
+// X-Forwarded-For may contain a comma-separated chain when traffic
+// traversed multiple proxies. We take the first entry (original client)
+// after trimming whitespace — the RFC 7239 recommendation.
+func ForwardedClientIP(trustedProxies []netip.Prefix) func(*http.Request) string {
+	return func(r *http.Request) string {
+		peer := parseRemoteAddr(r.RemoteAddr)
+		if !peer.IsValid() || !anyContains(trustedProxies, peer) {
+			return ClientIP(r)
+		}
+		if h := r.Header.Get("X-Forwarded-For"); h != "" {
+			// First entry = original client.
+			if comma := strings.IndexByte(h, ','); comma >= 0 {
+				h = h[:comma]
+			}
+			candidate := strings.TrimSpace(h)
+			if candidate != "" {
+				return candidate
+			}
+		}
+		if h := r.Header.Get("X-Real-IP"); h != "" {
+			return strings.TrimSpace(h)
+		}
+		return ClientIP(r)
+	}
+}
+
+func parseRemoteAddr(s string) netip.Addr {
+	host, _, err := net.SplitHostPort(s)
+	if err != nil {
+		host = s
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return netip.Addr{}
+	}
+	return addr
+}
+
+func anyContains(prefixes []netip.Prefix, addr netip.Addr) bool {
+	for _, p := range prefixes {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 // CleanupIdle prunes buckets that haven't been touched within maxIdle.

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -183,6 +184,55 @@ func TestSecurityHeaders_Present(t *testing.T) {
 		if w.Header().Get(hdr) == "" {
 			t.Fatalf("missing %q", hdr)
 		}
+	}
+}
+
+func TestForwardedClientIP_UntrustedPeerIgnoresHeader(t *testing.T) {
+	extractor := ForwardedClientIP([]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "1.2.3.4:9000"
+	req.Header.Set("X-Forwarded-For", "99.99.99.99")
+	if got := extractor(req); got != "1.2.3.4" {
+		t.Fatalf("untrusted peer must not honour XFF; got %q, want 1.2.3.4", got)
+	}
+}
+
+func TestForwardedClientIP_TrustedPeerHonoursXFF(t *testing.T) {
+	extractor := ForwardedClientIP([]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "10.1.2.3:9000"
+	req.Header.Set("X-Forwarded-For", "203.0.113.5")
+	if got := extractor(req); got != "203.0.113.5" {
+		t.Fatalf("trusted peer XFF: got %q, want 203.0.113.5", got)
+	}
+}
+
+func TestForwardedClientIP_XFFChainTakesFirstEntry(t *testing.T) {
+	extractor := ForwardedClientIP([]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "10.0.0.1:8000"
+	req.Header.Set("X-Forwarded-For", "203.0.113.5, 198.51.100.2, 10.0.0.9")
+	if got := extractor(req); got != "203.0.113.5" {
+		t.Fatalf("XFF chain: want first client, got %q", got)
+	}
+}
+
+func TestForwardedClientIP_FallsBackToXRealIP(t *testing.T) {
+	extractor := ForwardedClientIP([]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "10.1.2.3:9000"
+	req.Header.Set("X-Real-IP", "198.51.100.42")
+	if got := extractor(req); got != "198.51.100.42" {
+		t.Fatalf("X-Real-IP fallback: got %q", got)
+	}
+}
+
+func TestForwardedClientIP_NoHeadersUsesRemoteAddr(t *testing.T) {
+	extractor := ForwardedClientIP([]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "10.1.2.3:9000"
+	if got := extractor(req); got != "10.1.2.3" {
+		t.Fatalf("no headers: got %q", got)
 	}
 }
 

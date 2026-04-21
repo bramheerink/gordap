@@ -91,6 +91,47 @@ func TestCache_TTLExpiry(t *testing.T) {
 	}
 }
 
+func TestCache_StaleWhileRevalidate(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	clock := &clockStub{t: now}
+	ds := &counterDS{}
+	c := New(ds, Config{
+		Size:     4,
+		TTL:      time.Minute,
+		StaleTTL: time.Minute,
+		NowFunc:  clock.now,
+	})
+
+	// Warm the cache.
+	if _, err := c.GetDomain(context.Background(), "hot.nl"); err != nil {
+		t.Fatal(err)
+	}
+	if got := ds.domainCalls.Load(); got != 1 {
+		t.Fatalf("priming call: got %d", got)
+	}
+
+	// Enter the stale window (TTL expired, StaleTTL still active).
+	clock.advance(70 * time.Second)
+	// Stale hit: should return immediately + kick off background refresh.
+	if _, err := c.GetDomain(context.Background(), "hot.nl"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for the async refresh to land. The test is timing-sensitive
+	// because the refresh runs in its own goroutine; 200ms is ample on
+	// a loaded CI runner.
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if ds.domainCalls.Load() == 2 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := ds.domainCalls.Load(); got != 2 {
+		t.Fatalf("stale-while-revalidate should trigger 1 async refresh; got %d total backend calls", got)
+	}
+}
+
 func TestCache_LRUEvictionUnderPressure(t *testing.T) {
 	ds := &counterDS{}
 	c := New(ds, Config{Size: 2, TTL: time.Minute})

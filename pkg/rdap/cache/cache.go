@@ -39,10 +39,18 @@ import (
 // Config controls cache behaviour. Zero values are rejected by New; the
 // caller must pick deliberate numbers.
 type Config struct {
-	Size     int           // max entries per object class
-	TTL      time.Duration // time a cached hit stays valid
-	NegTTL   time.Duration // time a NotFound stays cached (typical: shorter than TTL)
-	NowFunc  func() time.Time
+	Size    int           // max entries per object class
+	TTL     time.Duration // time a cached hit stays valid
+	NegTTL  time.Duration // time a NotFound stays cached (typical: shorter than TTL)
+	NowFunc func() time.Time
+
+	// StaleTTL enables stale-while-revalidate: after TTL expires, the
+	// cache returns the stale entry for up to StaleTTL while a
+	// background goroutine refreshes the key via singleflight. Without
+	// SWR, a popular key causes a latency cliff on TTL expiry — one
+	// request waits for the DB, everyone else piles up in singleflight.
+	// Set to 0 to keep the old hard-TTL behaviour.
+	StaleTTL time.Duration
 }
 
 // DataSource is a caching wrapper. The zero value is not usable.
@@ -98,9 +106,18 @@ func (d *DataSource) ttlFor(err error) time.Duration {
 
 func getOrLoad[V any](ctx context.Context, d *DataSource, bucket *lru, key string,
 	fetch func(ctx context.Context, k string) (*V, error)) (*V, error) {
+	now := d.now()
 	if raw, ok := bucket.get(key); ok {
 		c := raw.(cached[V])
-		if d.now().Before(c.expires) {
+		// Fresh window: serve directly.
+		if now.Before(c.expires) {
+			return c.val, c.err
+		}
+		// Stale-while-revalidate window: serve the stale value and
+		// asynchronously refresh. Only one refresh per key is
+		// triggered, thanks to singleflight.
+		if d.cfg.StaleTTL > 0 && now.Before(c.expires.Add(d.cfg.StaleTTL)) {
+			go refreshAsync(d, bucket, key, fetch)
 			return c.val, c.err
 		}
 		bucket.remove(key)
@@ -108,6 +125,26 @@ func getOrLoad[V any](ctx context.Context, d *DataSource, bucket *lru, key strin
 	// Singleflight collapses concurrent misses on the same key into one
 	// backend call. Without it, a cold popular key can multiply load
 	// by the number of in-flight callers.
+	v, err, _ := d.sf.do(key, func() (any, error) {
+		val, err := fetch(context.Background(), key)
+		return val, err
+	})
+	var out *V
+	if v != nil {
+		out = v.(*V)
+	}
+	bucket.put(key, cached[V]{val: out, err: err, expires: d.now().Add(d.ttlFor(err))})
+	return out, err
+}
+
+// refreshAsync is the async arm of stale-while-revalidate. Uses a
+// detached context (independent of the triggering request) because
+// the request has already returned by the time this runs. Generic
+// package-level function because Go doesn't allow generic methods on
+// non-generic types.
+func refreshAsync[V any](d *DataSource, bucket *lru, key string, fetch func(ctx context.Context, k string) (*V, error)) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	v, err, _ := d.sf.do(key, func() (any, error) {
 		val, err := fetch(ctx, key)
 		return val, err
@@ -117,7 +154,6 @@ func getOrLoad[V any](ctx context.Context, d *DataSource, bucket *lru, key strin
 		out = v.(*V)
 	}
 	bucket.put(key, cached[V]{val: out, err: err, expires: d.now().Add(d.ttlFor(err))})
-	return out, err
 }
 
 func (d *DataSource) GetDomain(ctx context.Context, name string) (*datasource.Domain, error) {

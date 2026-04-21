@@ -6,8 +6,10 @@ import (
 	"flag"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -52,10 +54,12 @@ func main() {
 		maxBodyBytes    = flag.Int64("max-body-bytes", 4<<10, "max request body")
 		rateLimitRPS    = flag.Float64("rate-limit-rps", 50, "per-client-IP sustained rate (0 disables)")
 		rateLimitBurst  = flag.Float64("rate-limit-burst", 100, "per-client-IP burst capacity")
+		trustedProxies  = flag.String("trusted-proxies", "", "comma-separated CIDRs whose X-Forwarded-For is honoured (empty = direct-connect only)")
 		gzipMinSize     = flag.Int("gzip-min-size", 128, "compress responses larger than N bytes")
 		cacheSize       = flag.Int("cache-size", 50_000, "record LRU capacity per object class (0 disables)")
 		cacheTTL        = flag.Duration("cache-ttl", 60*time.Second, "record LRU TTL for positive results")
 		cacheNegTTL     = flag.Duration("cache-neg-ttl", 5*time.Second, "record LRU TTL for NotFound results")
+		cacheStaleTTL   = flag.Duration("cache-stale-ttl", 30*time.Second, "stale-while-revalidate window after TTL (0 disables SWR)")
 		respCacheSize   = flag.Int("response-cache-size", 50_000, "response cache capacity per tier (PII-safe; 0 disables)")
 		respCacheTTL    = flag.Duration("response-cache-ttl", 60*time.Second, "response cache TTL")
 		tlsCert         = flag.String("tls-cert", "", "TLS certificate file (enables HTTPS)")
@@ -90,8 +94,16 @@ func main() {
 	searchIndex, _ := ds.(search.Index)
 
 	if *cacheSize > 0 && *cacheTTL > 0 {
-		ds = cache.New(ds, cache.Config{Size: *cacheSize, TTL: *cacheTTL, NegTTL: *cacheNegTTL})
-		logger.Info("cache enabled", slog.Int("size", *cacheSize), slog.Duration("ttl", *cacheTTL))
+		ds = cache.New(ds, cache.Config{
+			Size:     *cacheSize,
+			TTL:      *cacheTTL,
+			NegTTL:   *cacheNegTTL,
+			StaleTTL: *cacheStaleTTL,
+		})
+		logger.Info("record cache enabled",
+			slog.Int("size", *cacheSize),
+			slog.Duration("ttl", *cacheTTL),
+			slog.Duration("stale_ttl", *cacheStaleTTL))
 	}
 
 	server := &handlers.Server{
@@ -133,7 +145,8 @@ func main() {
 	handler = middleware.MaxRequestBody(*maxBodyBytes)(handler)
 	if *rateLimitRPS > 0 {
 		rl := middleware.NewRateLimiter(*rateLimitRPS, *rateLimitBurst)
-		handler = rl.Middleware(middleware.ClientIP)(handler)
+		key := buildRateLimitKey(logger, *trustedProxies)
+		handler = rl.Middleware(key)(handler)
 		go rateLimitCleanup(ctx, rl)
 	}
 	handler = middleware.CORS()(handler)
@@ -322,6 +335,37 @@ func refreshLoop(ctx context.Context, r *bootstrap.Registry, every time.Duration
 			}
 		}
 	}
+}
+
+// buildRateLimitKey picks the right client-IP extractor for the
+// deployment. Direct-connect gets ClientIP; when the operator names
+// trusted proxy CIDRs we switch to ForwardedClientIP with that allowlist.
+func buildRateLimitKey(logger *slog.Logger, trustedProxies string) func(*http.Request) string {
+	if trustedProxies == "" {
+		return middleware.ClientIP
+	}
+	var prefixes []netip.Prefix
+	for _, raw := range strings.Split(trustedProxies, ",") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(raw)
+		if err != nil {
+			// Bare IPs accepted as /32 or /128.
+			if addr, err2 := netip.ParseAddr(raw); err2 == nil {
+				p = netip.PrefixFrom(addr, addr.BitLen())
+			} else {
+				logger.Warn("ignoring invalid trusted proxy CIDR",
+					slog.String("cidr", raw), slog.Any("err", err))
+				continue
+			}
+		}
+		prefixes = append(prefixes, p)
+	}
+	logger.Info("using X-Forwarded-For with trusted proxy allowlist",
+		slog.Int("cidrs", len(prefixes)))
+	return middleware.ForwardedClientIP(prefixes)
 }
 
 func rateLimitCleanup(ctx context.Context, rl *middleware.RateLimiter) {
