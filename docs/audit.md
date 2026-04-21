@@ -26,8 +26,15 @@ _Red-team review, 2026-04-21._
 
 **Bewust overgeslagen:**
 
-- 🟡 `==` op issuer/audience — signatuur-verificatie loopt eerst, timing-oppervlak is theoretisch. `subtle.ConstantTimeCompare` zou cargo-cult zijn.
-- 🟠 Stale-while-revalidate — nice-to-have, geen blocker. Roadmap.
+- 🟡 `==` op issuer/audience — signatuur-verificatie loopt eerst, timing-oppervlak is theoretisch. `subtle.ConstantTimeCompare` zou cargo-cult zijn. De audit zegt zelf "verwaarloosbaar" en adviseert de fix toch — dat is tegenstrijdig.
+
+**Nuance op enkele audit-findings** (ná eigen kritische herlezing):
+
+- **PII in record-cache als HIGH** — diagnose klopt, severity is opgeschroefd. De cache exposet alleen de `datasource.DataSource`-interface; om te lekken moet je die interface omzeilen en raw types zelf serialiseren. De invariant is door het type-systeem afgedwongen, niet enkel door code-review. Noem dat gedocumenteerde contract-discipline (LOW/MEDIUM), geen "aspirant-incident". ResponseCache is een upgrade, geen urgent fix.
+- **jti zonder shared store als MEDIUM** — in een multi-replica deployment is de per-replica replay-cache deels theater (attacker speelt token tegen replica-2). Onze implementatie dekt single-replica volledig; echte cross-replica revocation vereist Redis + IdP-webhook (buiten scope voor v1.0 zonder concrete operator-vraag).
+- **SWR als MEDIUM** — latency-optimalisatie, geen correctheidsprobleem. Singleflight serialiseert thundering herd al. Hoort op LOW/P3. Wel gebouwd omdat 't goedkoop was.
+- **"Zonder jCard-fallback kun je geen gTLD-registry draaien"** — correct voor ICANN-contracted parties vandaag, niet universeel. Voor ccTLD's/RIR's is JSContact-only prima. Per-request negotiation via `?jscard=false` of `Accept: application/rdap+json; profile=jcard` is toegevoegd zodat legacy-clients expliciet om jCard kunnen vragen zonder de moderne pad te beïnvloeden.
+- **"OpenRDAP draait bij meerdere echte TLD's"** — **feitelijk onjuist**. OpenRDAP is een Go client-library + CLI + web-portal. Draait nergens authoritative. Mogelijk verward met APNIC rdapd of rdap.org (bootstrap).
 
 ---
 

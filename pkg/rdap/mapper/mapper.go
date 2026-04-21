@@ -35,6 +35,12 @@ type Options struct {
 	// RDAP profile v2.2 for gTLD operators; the JSContact-only path
 	// is fine for RIR / ccTLD deployments that have already moved on.
 	EmitJCard bool
+
+	// JCardOnly requests jCard-exclusive output: vcardArray is emitted
+	// and jscard is omitted. Set by handlers when the caller negotiated
+	// jCard via `?jscard=false` or `Accept: application/rdap+json;
+	// profile=jcard`. Implies EmitJCard.
+	JCardOnly bool
 }
 
 // Domain converts a datasource.Domain into its RFC 9083 wire form.
@@ -150,9 +156,11 @@ func entityWithMarks(c datasource.Contact, opts Options) (types.Entity, []Redact
 		Roles:  c.Roles,
 	}
 	if card := buildCardFromView(c, view); card != nil {
-		e.JSCard = card
-		if opts.EmitJCard {
+		if opts.EmitJCard || opts.JCardOnly {
 			e.VCardArray = jscontact.ToJCard(card)
+		}
+		if !opts.JCardOnly {
+			e.JSCard = card
 		}
 	}
 	return e, view.Marks
@@ -443,9 +451,11 @@ func registrarEntity(r *datasource.Registrar, opts Options) types.Entity {
 				"org": {Type: "Organization", Name: r.Name},
 			},
 		}
-		e.JSCard = card
-		if opts.EmitJCard {
+		if opts.EmitJCard || opts.JCardOnly {
 			e.VCardArray = jscontact.ToJCard(card)
+		}
+		if !opts.JCardOnly {
+			e.JSCard = card
 		}
 	}
 	if r.Abuse != nil {

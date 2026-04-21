@@ -1,5 +1,42 @@
 package cache
 
+// The ResponseCache in this file is the PII-safe cache layer.
+//
+// Ordering contract — CRITICAL, audited by code review.
+//
+// A response MUST have passed through the tier-aware redactor before
+// any byte of it reaches ResponseCache.Put. The only sanctioned
+// insertion path is via the response-cache HTTP middleware in
+// pkg/rdap/handlers/response_cache.go, which arranges the ordering:
+//
+//	1. auth.Middleware decodes the bearer token and places the
+//	   caller's AccessLevel on the request context.
+//	2. responseCacheMiddleware computes the cache key
+//	   (object, id, tier) and checks for a hit. On hit, serve. On
+//	   miss, install a captureWriter and call next.
+//	3. The matching HTTP handler renders the response:
+//	      a. pulls the raw record from the DataSource;
+//	      b. invokes mapper.Domain / mapper.Entity / …, which calls
+//	         mapper.RedactContact with the caller's AccessLevel;
+//	      c. JSON-encodes the redacted view into the captureWriter.
+//	4. captureWriter tees the bytes to both the real ResponseWriter
+//	   (the client sees the response immediately) AND its internal
+//	   buffer (for cache storage).
+//	5. Only after the handler returns and the status is 2xx does
+//	   ResponseCache.Put get called.
+//
+// The invariant any contributor MUST preserve:
+//
+//	No code path may call ResponseCache.Put without first running
+//	mapper.Redact on the source data for the access tier encoded in
+//	the cache key.
+//
+// Because the cache key includes the tier, a stored body is already
+// appropriate for its key — a privileged entry can hold privileged
+// JSON, an anonymous entry can hold anonymous JSON, and the
+// middleware never serves an entry across tiers. No crossover, no
+// PII leak from a warm cache to a colder caller.
+
 import (
 	"container/list"
 	"sync"

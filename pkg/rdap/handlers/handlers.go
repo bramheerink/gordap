@@ -75,8 +75,33 @@ func (s *Server) opts(r *http.Request) mapper.Options {
 		ExtraConformance: s.ExtraConformance,
 		ExtraNotices:     s.Notices,
 		EmitJCard:        s.EmitJCard,
+		JCardOnly:        wantsJCardOnly(r),
 		RedactionReason:  s.RedactionReason,
 	}
+}
+
+// wantsJCardOnly reports whether the caller has explicitly negotiated
+// jCard-exclusive output. Two signals honored:
+//
+//   - ?jscard=false query parameter — simple, works from any client.
+//   - Accept: application/rdap+json; profile=jcard — media-type-param
+//     convention common in conformance tools.
+//
+// Either makes the response omit the JSContact `jscard` member and
+// emit only the legacy `vcardArray`. Absence leaves the server-default
+// behaviour untouched.
+func wantsJCardOnly(r *http.Request) bool {
+	if v := r.URL.Query().Get("jscard"); v == "false" || v == "0" || v == "no" {
+		return true
+	}
+	for _, part := range strings.Split(r.Header.Get("Accept"), ",") {
+		for _, kv := range strings.Split(part, ";") {
+			if strings.EqualFold(strings.TrimSpace(kv), "profile=jcard") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
