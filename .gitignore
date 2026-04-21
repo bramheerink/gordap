@@ -27,6 +27,10 @@ Thumbs.db
 !testdata/*.pem
 !testdata/*.key
 
+# Private notes / working docs (not for public repo)
+/docs/feedback_audit.md
+/docs/*.private.md
+
 # Docker / compose
 .env
 .env.local

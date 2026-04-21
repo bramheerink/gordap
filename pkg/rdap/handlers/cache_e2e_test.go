@@ -51,13 +51,19 @@ func TestE2E_ResponseCache_SecondRequestIsHit(t *testing.T) {
 	ts, ds, rc := newResponseCacheServer(t)
 	defer ts.Close()
 
-	resp1, _ := ts.Client().Get(ts.URL + "/domain/example.nl")
+	resp1, err := ts.Client().Get(ts.URL + "/domain/example.nl")
+	if err != nil {
+		t.Fatalf("first request: %v", err)
+	}
 	_ = resp1.Body.Close()
 	if resp1.Header.Get("X-Gordap-Cache") == "HIT" {
 		t.Fatal("first request should not be a cache hit")
 	}
 
-	resp2, _ := ts.Client().Get(ts.URL + "/domain/example.nl")
+	resp2, err := ts.Client().Get(ts.URL + "/domain/example.nl")
+	if err != nil {
+		t.Fatalf("second request: %v", err)
+	}
 	defer resp2.Body.Close()
 	if resp2.Header.Get("X-Gordap-Cache") != "HIT" {
 		t.Fatalf("second request should be HIT; header=%v", resp2.Header)
@@ -81,7 +87,10 @@ func TestE2E_ResponseCache_ErrorsNotCached(t *testing.T) {
 
 	// Two 404s for the same missing name.
 	for i := 0; i < 2; i++ {
-		resp, _ := ts.Client().Get(ts.URL + "/domain/missing.nl")
+		resp, err := ts.Client().Get(ts.URL + "/domain/missing.nl")
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
 		_ = resp.Body.Close()
 	}
 	if rc.Len() != 0 {
