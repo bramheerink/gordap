@@ -104,9 +104,22 @@ and security boundaries in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## How gordap compares
 
-- **vs [openrdap/rdap](https://github.com/openrdap/rdap)** — they are a
-  client/CLI, we are a server. Complementary. Our real-world test suite
-  uses their CLI to verify interop.
+- **vs [openrdap/rdap](https://github.com/openrdap/rdap)** — OpenRDAP
+  is a Go client library + CLI + a web lookup portal (openrdap.org)
+  that proxies queries to authoritative registry servers. It doesn't
+  run a registry, it consumes them. gordap is the other side of the
+  wire: it serves registration data authoritatively. Our real-world
+  test suite uses their CLI to verify response interop.
+- **vs [rdap-org/*](https://github.com/rdap-org)** — RDAP.ORG is a
+  community ecosystem of supporting tooling: a bootstrap server
+  ([rdap.org](https://github.com/rdap-org/rdap.org)), a web client
+  ([client.rdap.org](https://github.com/rdap-org/client.rdap.org)), a
+  response validator
+  ([validator.rdap.org](https://github.com/rdap-org/validator.rdap.org)),
+  and a deployment dashboard. None of these serve authoritative
+  registration data — they sit *next to* RDAP servers. Our real-world
+  test suite calls their validator CLI as a second-opinion
+  conformance check alongside OpenRDAP's client.
 - **vs [icann/icann-rdap](https://github.com/icann/icann-rdap)** (Rust)
   — closest peer. They are the reference-implementation authority; we
   are the Go-native toolkit for teams who want to embed RDAP into an

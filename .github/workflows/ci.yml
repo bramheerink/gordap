@@ -47,8 +47,17 @@ jobs:
       - name: Install openrdap CLI for interop
         run: go install github.com/openrdap/rdap/cmd/rdap@latest
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install rdap-org/validator CLI for second-opinion conformance
+        run: make install-validator
+
       - name: Build gordap + run real-world suite
         run: make test-realworld
+        env:
+          PATH: ${{ github.workspace }}/go/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin
 
   vuln:
     name: govulncheck

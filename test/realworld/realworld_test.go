@@ -461,4 +461,29 @@ func TestRealWorld_Suite(t *testing.T) {
 			t.Fatalf("openrdap didn't recognise our response:\n%s", out)
 		}
 	})
+
+	// Second-opinion conformance check via rdap-org/validator.rdap.org.
+	// The CLI is a Node.js script; we look for it in PATH (installed
+	// via `make install-validator`) and skip otherwise. It emits a
+	// non-zero exit code on any RFC violation.
+	t.Run("RDAPORG_Validator", func(t *testing.T) {
+		bin, err := exec.LookPath("rdap-validator")
+		if err != nil {
+			t.Skipf("rdap-validator CLI not installed; run `make install-validator`: %v", err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, bin, srv.addr+"/domain/example.nl")
+		out, runErr := cmd.CombinedOutput()
+		// The validator prints one line per rule. If any failed it
+		// exits non-zero; we surface the failing output verbatim so
+		// humans reading the CI log can see which rule tripped.
+		if runErr != nil {
+			t.Fatalf("validator flagged issues:\n%s", out)
+		}
+		if !strings.Contains(string(out), "example.nl") &&
+			!strings.Contains(strings.ToLower(string(out)), "valid") {
+			t.Logf("validator output (no obvious success marker, but exit 0):\n%s", out)
+		}
+	})
 }
