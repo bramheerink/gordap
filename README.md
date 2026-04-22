@@ -167,7 +167,7 @@ gordap \
   -bootstrap
 ```
 
-Full YAML example in [`docs/config.example.yaml`](docs/config.example.yaml).
+Full YAML example in [`gordap.example.yaml`](gordap.example.yaml).
 
 ## Production checklist
 
