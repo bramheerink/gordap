@@ -204,15 +204,18 @@ per-endpoint, status-code distribution, cache hit ratio
 (via `X-Gordap-Cache`), and the first ten validation mismatches
 (if any) for human debugging.
 
-Sample run on a developer laptop (memory backend, 100 workers, 10s):
+Sample runs on a developer laptop (memory backend, no rate limit):
 
 ```
-Total requests:     187,018
-Throughput:         18,696 req/s
-Latency p50/p99:    2.5 ms / 19.0 ms
-Cache hit ratio:    84.7%
-Validation passed:  99.95%
+100 workers / 10s:   24,623 req/s   p50=2.1ms p99=14ms  100.00% pass
+500 workers / 30s:   26,362 req/s   p50=11ms p99=64ms   100.00% pass
 ```
+
+Note: when interpreting validation failures, distinguish *real* server
+defects (status mismatch, malformed body, wrong content) from
+test-tool artefacts (test-duration ctx cancelling in-flight requests).
+gordap-stress detaches the per-request context from the test
+deadline so the latter doesn't show up as the former.
 
 ### 7.2 Horizontal scaling for stress generation
 

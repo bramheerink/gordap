@@ -240,16 +240,30 @@ func main() {
 }
 
 func runStress(ctx context.Context, base string, concurrency, corpus int, timeout time.Duration, st *stats) {
+	// Tuned Transport: default MaxIdleConnsPerHost=2 starves a 100-worker
+	// pool. Bump it so connection setup doesn't dominate the measured
+	// latency tail.
+	transport := &http.Transport{
+		MaxIdleConns:        concurrency * 2,
+		MaxIdleConnsPerHost: concurrency * 2,
+		IdleConnTimeout:     90 * time.Second,
+	}
+
 	var wg sync.WaitGroup
 	for w := 0; w < concurrency; w++ {
 		wg.Add(1)
 		go func(seed uint64) {
 			defer wg.Done()
 			r := rand.New(rand.NewPCG(seed, seed^0xdeadbeef))
-			client := &http.Client{Timeout: timeout}
+			client := &http.Client{Timeout: timeout, Transport: transport}
 			for ctx.Err() == nil {
 				q := pickQuery(r, corpus)
-				exec(ctx, client, base, q, st)
+				// Detached request context: per-request deadline is the
+				// http.Client.Timeout, NOT the test-duration ctx. Otherwise
+				// every in-flight request at the moment the test ends
+				// fails with "context deadline exceeded" — pure tool
+				// artefact, looks like server bugs in the report.
+				exec(context.Background(), client, base, q, st)
 			}
 		}(uint64(w))
 	}
