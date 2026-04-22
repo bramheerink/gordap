@@ -186,6 +186,31 @@ Before exposing publicly:
 
 Details in [SECURITY.md](SECURITY.md).
 
+## Stress + correctness testing
+
+A purpose-built load tester sits in `cmd/gordap-stress`. Unlike
+generic HTTP benchmarkers (k6, wrk, hey), every response is parsed
+and validated against deterministic expectations from
+`internal/synth` — a 200 with a malformed body counts as a defect,
+not as throughput. Reports throughput per endpoint, latency
+percentiles (p50/p90/p95/p99/p999), cache hit ratio, status
+distribution, and the first ten validation mismatches.
+
+Quickstart:
+
+```bash
+make demo-synth N=10000           # boot gordap with 10k synthetic records
+make stress C=100 D=30s           # 100 workers for 30 seconds
+```
+
+Horizontal generation: each box runs `gordap-stress -json > run.json`,
+roll up centrally with `gordap-stress-aggregate run-*.json`. See
+[PERFORMANCE.md](PERFORMANCE.md#7-benchmarks) for the full recipe and
+typical numbers.
+
+For Postgres-backed runs `make seed N=100000` bulk-loads via pgx
+CopyFrom (~50-200k rows/s).
+
 ## Real-world test suite
 
 `make test-realworld` boots the reference binary and runs 22

@@ -184,8 +184,91 @@ Summary of tunable parameters that move p99 most:
 
 ## 7. Benchmarks
 
-Real numbers on the hardware you deploy on matter more than synthetic
-lab numbers. Do:
+### 7.1 Built-in load + correctness tester
+
+`cmd/gordap-stress` does what generic HTTP load testers (hey, wrk,
+vegeta, k6) don't: every response is *parsed and validated* against the
+deterministic expectation derived from `internal/synth`. A 200 with a
+malformed body counts as a defect, not as throughput. This catches
+silent regressions that pure RPS-counting tools miss.
+
+Quickstart against a memory-backed demo:
+
+```bash
+make demo-synth N=10000             # boots gordap on :8080 with 10k synthetic records
+make stress C=100 D=30s URL=http://localhost:8080
+```
+
+Output covers throughput, p50/p90/p95/p99/p999 latency overall and
+per-endpoint, status-code distribution, cache hit ratio
+(via `X-Gordap-Cache`), and the first ten validation mismatches
+(if any) for human debugging.
+
+Sample run on a developer laptop (memory backend, 100 workers, 10s):
+
+```
+Total requests:     187,018
+Throughput:         18,696 req/s
+Latency p50/p99:    2.5 ms / 19.0 ms
+Cache hit ratio:    84.7%
+Validation passed:  99.95%
+```
+
+### 7.2 Horizontal scaling for stress generation
+
+A single load-generator instance saturates around 20-40k RPS depending
+on hardware (HTTP client + JSON parsing dominates). Beyond that, fan
+out across machines and use `gordap-stress-aggregate` to roll up:
+
+```bash
+# On each generator host:
+gordap-stress -url=https://rdap.example.com -c=200 -d=300s -json \
+   > /tmp/run-$(hostname).json
+
+# Centrally:
+gordap-stress-aggregate /tmp/run-*.json
+```
+
+Aggregated output sums request counts, weights percentiles by request
+volume, and merges per-endpoint breakdowns. Approximate but stable for
+ranking and trend lines. For exact cross-machine percentiles you'd ship
+raw samples (HDR-histogram serialisation) — not built; open an issue if
+you need it.
+
+### 7.3 Server-side diagnostics
+
+Run gordap with `--debug-addr=127.0.0.1:6060` (private only — pprof
+publicly exposed is a CVE waiting). You then get:
+
+- `http://127.0.0.1:6060/debug/vars` — expvar JSON (per-op counters
+  via `pkg/rdap/metrics`, runtime memstats, custom Publish entries)
+- `http://127.0.0.1:6060/debug/pprof/heap` — heap profile
+- `http://127.0.0.1:6060/debug/pprof/profile?seconds=30` — CPU profile
+- `http://127.0.0.1:6060/debug/pprof/goroutine` — goroutine dump
+
+Correlate client-side stress numbers with server-side memstats /
+goroutine count to pinpoint where pressure shows up: GC pauses,
+goroutine leaks, lock contention.
+
+### 7.4 Postgres-backed runs
+
+For PG-backed stress tests:
+
+```bash
+export DATABASE_URL=postgres://rdap:pw@localhost/rdap
+psql -1 -f pkg/rdap/storage/postgres/schema.sql
+make seed N=100000
+make demo URL_FLAG=-database-url=$DATABASE_URL  # or run gordap manually with -database-url
+make stress C=100 D=60s
+```
+
+The seeder uses pgx CopyFrom and reaches 50-200k rows/s on commodity
+disks; 100k synthetic domains seeds in 1-3s.
+
+### 7.5 Generic tooling fallback
+
+The validation tier is what makes our stress unique, but generic
+tools work too if you only care about RPS:
 
 1. `hey -n 100000 -c 100 https://rdap.example.com/domain/example.nl`
 2. `wrk -t 8 -c 500 -d 60s --latency <url>`

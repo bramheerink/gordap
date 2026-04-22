@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"expvar"
 	"flag"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -37,6 +39,7 @@ func main() {
 		addr            = flag.String("addr", ":8080", "listen address")
 		dsn             = flag.String("database-url", os.Getenv("DATABASE_URL"), "PostgreSQL connection string; empty = memory demo mode")
 		demo            = flag.Bool("demo", false, "force memory demo backend")
+		demoSynthN      = flag.Int("demo-synth", 0, "if >0, seed N synthetic domains/entities for stress testing (memory backend only)")
 		selfLinkBase    = flag.String("self-link-base", os.Getenv("GORDAP_SELF_LINK_BASE"), "public canonical URL for rel=self links")
 		icannGTLD       = flag.Bool("icann-gtld", false, "enable ICANN RP2.2 / TIG v2.2 conformance preset")
 		tosURL          = flag.String("tos-url", "", "Terms of Service URL (required when --icann-gtld)")
@@ -64,6 +67,7 @@ func main() {
 		respCacheTTL    = flag.Duration("response-cache-ttl", 60*time.Second, "response cache TTL")
 		tlsCert         = flag.String("tls-cert", "", "TLS certificate file (enables HTTPS)")
 		tlsKey          = flag.String("tls-key", "", "TLS private key file")
+		debugAddr       = flag.String("debug-addr", "", "if set, serve /debug/vars (expvar) + /debug/pprof on this address (private only)")
 	)
 	flag.Parse()
 
@@ -84,7 +88,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	ds, closer, err := buildDataSource(ctx, logger, *demo, *dsn)
+	ds, closer, err := buildDataSource(ctx, logger, *demo, *dsn, *demoSynthN)
 	if err != nil {
 		logger.Error("datasource init failed", slog.Any("err", err))
 		os.Exit(1)
@@ -160,6 +164,38 @@ func main() {
 		ReadTimeout:       *readTimeo,
 		WriteTimeout:      *writeTimeo,
 		IdleTimeout:       *idleTimeo,
+	}
+
+	// Optional diagnostic endpoint. Bind to a private interface (e.g.
+	// 127.0.0.1:6060) — exposing pprof publicly is a CVE waiting to
+	// happen. Separate from the main mux so /debug/* never appears
+	// alongside RDAP routes.
+	if *debugAddr != "" {
+		dmux := http.NewServeMux()
+		dmux.Handle("/debug/vars", expvar.Handler())
+		dmux.HandleFunc("/debug/pprof/", pprof.Index)
+		dmux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		dmux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		dmux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		dmux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		dsrv := &http.Server{
+			Addr:              *debugAddr,
+			Handler:           dmux,
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		go func() {
+			logger.Info("debug endpoint starting", slog.String("addr", *debugAddr))
+			if err := dsrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Warn("debug listen failed", slog.Any("err", err))
+			}
+		}()
+		// Publish high-level runtime/cache info via expvar so a
+		// gordap-stress run can correlate client-side metrics with
+		// server-side state. The metrics package's ExpvarObserver is
+		// the place to add datasource-call counters.
+		expvar.Publish("gordap.startup", expvar.Func(func() any {
+			return time.Now().Format(time.RFC3339)
+		}))
 	}
 
 	go func() {
@@ -307,12 +343,18 @@ func buildVerifier(logger *slog.Logger, jwksURL, iss, aud string, scopeMap map[s
 	})
 }
 
-func buildDataSource(ctx context.Context, logger *slog.Logger, demo bool, dsn string) (datasource.DataSource, func(), error) {
+func buildDataSource(ctx context.Context, logger *slog.Logger, demo bool, dsn string, synthN int) (datasource.DataSource, func(), error) {
 	if demo || dsn == "" {
 		store := memory.New()
-		memory.Seed(store)
-		logger.Warn("demo mode: in-memory seed data (do not use in production)",
-			slog.String("seed", "example.nl, bücher.example"))
+		if synthN > 0 {
+			memory.SeedSynthetic(store, synthN)
+			logger.Warn("demo mode: synthetic stress-test seed",
+				slog.Int("n", synthN))
+		} else {
+			memory.Seed(store)
+			logger.Warn("demo mode: in-memory seed data (do not use in production)",
+				slog.String("seed", "example.nl, bücher.example"))
+		}
 		return store, func() {}, nil
 	}
 	pool, err := pgxpool.New(ctx, dsn)
