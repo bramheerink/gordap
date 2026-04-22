@@ -103,11 +103,23 @@ func (p *Provider) domainNameservers(ctx context.Context, handle string) ([]data
 }
 
 func (p *Provider) domainContacts(ctx context.Context, handle string) ([]datasource.Contact, error) {
+	// Single query with correlated subqueries for emails + phones. The
+	// older N+1 pattern (one followup query per contact for emails,
+	// another for phones) was the dominant tail in stress tests with
+	// >40% cache miss — a domain with one contact triggered five PG
+	// round-trips. This version is one round-trip per domain regardless
+	// of contact count.
 	const q = `
 	SELECT e.handle, array_agg(DISTINCT dc.role) AS roles,
 	       e.kind, e.full_name, e.organization, e.title,
 	       e.country_code, e.locality, e.region, e.postal_code, e.street,
-	       e.created_at, e.updated_at, e.extras
+	       e.created_at, e.updated_at, e.extras,
+	       COALESCE((SELECT array_agg(ee.email::text ORDER BY ee.email)
+	                   FROM entity_emails ee WHERE ee.entity_handle = e.handle),
+	                '{}'::text[]) AS emails,
+	       COALESCE((SELECT json_agg(json_build_object('number', ep.number, 'kinds', ep.kinds) ORDER BY ep.number)
+	                   FROM entity_phones ep WHERE ep.entity_handle = e.handle),
+	                '[]'::json) AS phones
 	  FROM domain_contacts dc
 	  JOIN entities e ON e.handle = dc.entity_handle
 	 WHERE dc.domain_handle = $1
@@ -119,32 +131,74 @@ func (p *Provider) domainContacts(ctx context.Context, handle string) ([]datasou
 	defer rows.Close()
 	var out []datasource.Contact
 	for rows.Next() {
-		c, err := scanContactRow(rows)
+		c, err := scanContactRowFull(rows)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, c)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	// Channels are pulled in a batched follow-up — one round-trip per
-	// contact stays predictable and avoids a cross-product join that can
-	// explode when a contact has many emails and phones.
-	for i := range out {
-		if err := p.attachChannels(ctx, &out[i]); err != nil {
-			return nil, err
-		}
-	}
-	return out, nil
+	return out, rows.Err()
 }
 
 type scanner interface {
 	Scan(dest ...any) error
 }
 
-// scanContactRow reads one entity row. Used by both the entity- and
-// domain-contacts code paths.
+// scanContactRowFull reads one entity row plus its channels in the
+// same scan, eliminating the per-contact N+1 round-trips. The phones
+// JSON shape mirrors what hydrateContactDetails wrote in the v1
+// schema — keep them in sync if either side changes.
+func scanContactRowFull(s scanner) (datasource.Contact, error) {
+	var (
+		c          datasource.Contact
+		country    *string
+		locality   string
+		region     string
+		postal     string
+		street     []string
+		extrasJSON []byte
+		emails     []string
+		phonesJSON []byte
+	)
+	if err := s.Scan(&c.Handle, &c.Roles, &c.Kind,
+		&c.FullName, &c.Organization, &c.Title,
+		&country, &locality, &region, &postal, &street,
+		&c.CreatedAt, &c.UpdatedAt, &extrasJSON,
+		&emails, &phonesJSON,
+	); err != nil {
+		return datasource.Contact{}, err
+	}
+	if country != nil || locality != "" || region != "" || postal != "" || len(street) > 0 {
+		addr := &datasource.Address{Locality: locality, Region: region, PostalCode: postal, Street: street}
+		if country != nil {
+			addr.CountryCode = *country
+		}
+		c.Address = addr
+	}
+	if len(extrasJSON) > 0 {
+		if err := json.Unmarshal(extrasJSON, &c.Extras); err != nil {
+			return datasource.Contact{}, fmt.Errorf("postgres: decode entity extras: %w", err)
+		}
+	}
+	c.Emails = emails
+	if len(phonesJSON) > 0 {
+		var raw []struct {
+			Number string   `json:"number"`
+			Kinds  []string `json:"kinds"`
+		}
+		if err := json.Unmarshal(phonesJSON, &raw); err != nil {
+			return datasource.Contact{}, fmt.Errorf("postgres: decode phones JSON: %w", err)
+		}
+		for _, p := range raw {
+			c.Phones = append(c.Phones, datasource.Phone{Number: p.Number, Kinds: p.Kinds})
+		}
+	}
+	return c, nil
+}
+
+// scanContactRow is kept for the test that exercises the legacy scan
+// shape (no joined channels). New call sites should use
+// scanContactRowFull instead.
 func scanContactRow(s scanner) (datasource.Contact, error) {
 	var (
 		c           datasource.Contact
@@ -177,6 +231,10 @@ func scanContactRow(s scanner) (datasource.Contact, error) {
 	return c, nil
 }
 
+// attachChannels remains for any caller that scans the legacy shape
+// (not used by GetEntity / domainContacts anymore). Kept callable so a
+// future bulk-load path could reuse it; remove if unused at next
+// audit.
 func (p *Provider) attachChannels(ctx context.Context, c *datasource.Contact) error {
 	rows, err := p.pool.Query(ctx,
 		`SELECT email FROM entity_emails WHERE entity_handle = $1 ORDER BY email`, c.Handle)

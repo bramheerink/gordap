@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -106,35 +107,87 @@ func (p *Provider) SearchEntities(ctx context.Context, q search.Query) (*search.
 	limit := search.ClampLimit(q.Limit, 50, 500)
 	whereClause := strings.Join(where, " AND ")
 
-	countSQL := "SELECT count(*) FROM entities e WHERE " + whereClause
-	var total int
-	if err := p.pool.QueryRow(ctx, countSQL, args...).Scan(&total); err != nil {
-		return nil, fmt.Errorf("postgres: count entities: %w", err)
-	}
-
+	// Single scan with COUNT(*) OVER() — plus inlined emails/phones so
+	// search results don't trigger a per-row N+1 from the caller.
 	selSQL := `
 	SELECT e.handle, ARRAY[]::text[] AS roles, e.kind,
 	       e.full_name, e.organization, e.title,
 	       e.country_code, e.locality, e.region, e.postal_code, e.street,
-	       e.created_at, e.updated_at, e.extras
+	       e.created_at, e.updated_at, e.extras,
+	       COALESCE((SELECT array_agg(ee.email::text ORDER BY ee.email)
+	                   FROM entity_emails ee WHERE ee.entity_handle = e.handle),
+	                '{}'::text[]) AS emails,
+	       COALESCE((SELECT json_agg(json_build_object('number', ep.number, 'kinds', ep.kinds) ORDER BY ep.number)
+	                   FROM entity_phones ep WHERE ep.entity_handle = e.handle),
+	                '[]'::json) AS phones,
+	       count(*) OVER() AS total_count
 	  FROM entities e
 	 WHERE ` + whereClause + fmt.Sprintf(` ORDER BY e.handle LIMIT $%d OFFSET $%d`, len(args)+1, len(args)+2)
 	args = append(args, limit, q.Offset)
 
 	rows, err := p.pool.Query(ctx, selSQL, args...)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: list entities: %w", err)
+		return nil, fmt.Errorf("postgres: search entities: %w", err)
 	}
 	defer rows.Close()
-	var items []datasource.Contact
+	var (
+		items []datasource.Contact
+		total int
+	)
 	for rows.Next() {
-		c, err := scanContactRow(rows)
+		c, err := scanEntityWithTotal(rows, &total)
 		if err != nil {
 			return nil, err
 		}
 		items = append(items, c)
 	}
 	return &search.Result[datasource.Contact]{Items: items, Total: total}, rows.Err()
+}
+
+// scanEntityWithTotal scans the same shape as scanContactRowFull plus
+// the trailing total_count column for the search COUNT(*) OVER() trick.
+func scanEntityWithTotal(s scanner, total *int) (datasource.Contact, error) {
+	var (
+		c          datasource.Contact
+		country    *string
+		locality   string
+		region     string
+		postal     string
+		street     []string
+		extrasJSON []byte
+		emails     []string
+		phonesJSON []byte
+	)
+	if err := s.Scan(&c.Handle, &c.Roles, &c.Kind,
+		&c.FullName, &c.Organization, &c.Title,
+		&country, &locality, &region, &postal, &street,
+		&c.CreatedAt, &c.UpdatedAt, &extrasJSON,
+		&emails, &phonesJSON, total,
+	); err != nil {
+		return datasource.Contact{}, err
+	}
+	if country != nil || locality != "" || region != "" || postal != "" || len(street) > 0 {
+		addr := &datasource.Address{Locality: locality, Region: region, PostalCode: postal, Street: street}
+		if country != nil {
+			addr.CountryCode = *country
+		}
+		c.Address = addr
+	}
+	if len(extrasJSON) > 0 {
+		_ = json.Unmarshal(extrasJSON, &c.Extras)
+	}
+	c.Emails = emails
+	if len(phonesJSON) > 0 {
+		var raw []struct {
+			Number string   `json:"number"`
+			Kinds  []string `json:"kinds"`
+		}
+		_ = json.Unmarshal(phonesJSON, &raw)
+		for _, p := range raw {
+			c.Phones = append(c.Phones, datasource.Phone{Number: p.Number, Kinds: p.Kinds})
+		}
+	}
+	return c, nil
 }
 
 func (p *Provider) SearchNameservers(ctx context.Context, q search.Query) (*search.Result[datasource.Nameserver], error) {
@@ -144,24 +197,23 @@ func (p *Provider) SearchNameservers(ctx context.Context, q search.Query) (*sear
 	}
 	limit := search.ClampLimit(q.Limit, 50, 500)
 
-	const countQ = `SELECT count(*) FROM nameservers WHERE ldh_name ILIKE $1`
-	var total int
-	if err := p.pool.QueryRow(ctx, countQ, ilikePattern(pattern)).Scan(&total); err != nil {
-		return nil, fmt.Errorf("postgres: count nameservers: %w", err)
-	}
-
-	const selQ = `SELECT handle, ldh_name, unicode_name, ipv4, ipv6
-	                FROM nameservers WHERE ldh_name ILIKE $1
-	                ORDER BY ldh_name LIMIT $2 OFFSET $3`
-	rows, err := p.pool.Query(ctx, selQ, ilikePattern(pattern), limit, q.Offset)
+	const q2 = `
+	SELECT handle, ldh_name, unicode_name, ipv4, ipv6,
+	       count(*) OVER() AS total_count
+	  FROM nameservers WHERE ldh_name ILIKE $1
+	  ORDER BY ldh_name LIMIT $2 OFFSET $3`
+	rows, err := p.pool.Query(ctx, q2, ilikePattern(pattern), limit, q.Offset)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: list nameservers: %w", err)
+		return nil, fmt.Errorf("postgres: search nameservers: %w", err)
 	}
 	defer rows.Close()
-	var items []datasource.Nameserver
+	var (
+		items []datasource.Nameserver
+		total int
+	)
 	for rows.Next() {
 		var n datasource.Nameserver
-		if err := rows.Scan(&n.Handle, &n.LDHName, &n.UnicodeName, &n.IPv4, &n.IPv6); err != nil {
+		if err := rows.Scan(&n.Handle, &n.LDHName, &n.UnicodeName, &n.IPv4, &n.IPv6, &total); err != nil {
 			return nil, err
 		}
 		items = append(items, n)
