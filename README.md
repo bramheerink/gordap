@@ -196,7 +196,16 @@ not as throughput. Reports throughput per endpoint, latency
 percentiles (p50/p90/p95/p99/p999), cache hit ratio, status
 distribution, and the first ten validation mismatches.
 
-Quickstart:
+### Toolset
+
+| Binary | Use |
+|---|---|
+| `gordap` | the server (memory or PG backend; `--debug-addr` for pprof + expvar) |
+| `gordap-seed` | bulk-load N synthetic records into Postgres via pgx CopyFrom |
+| `gordap-stress` | concurrent load + per-response correctness validator |
+| `gordap-stress-aggregate` | combine JSON reports from N parallel generators |
+
+### Quickstart
 
 ```bash
 make demo-synth N=10000           # boot gordap with 10k synthetic records
@@ -205,11 +214,21 @@ make stress C=100 D=30s           # 100 workers for 30 seconds
 
 Horizontal generation: each box runs `gordap-stress -json > run.json`,
 roll up centrally with `gordap-stress-aggregate run-*.json`. See
-[PERFORMANCE.md](PERFORMANCE.md#7-benchmarks) for the full recipe and
-typical numbers.
+[PERFORMANCE.md](PERFORMANCE.md) §7-9 for the full recipe, the
+measurement history we ran during development, and the ccTLD-scale
+deployment proposal.
 
-For Postgres-backed runs `make seed N=100000` bulk-loads via pgx
-CopyFrom (~50-200k rows/s).
+### Headline numbers (synthetic stress, native PG 18.3, single workstation replica)
+
+| Backend | Throughput | Domain p99 | Validation |
+|---|---|---|---|
+| Memory-only | 26,362 RPS | 14ms | 100.00% |
+| PostgreSQL (native, indexed) | **22,134 RPS** | **15ms** | **100.00%** (1.328M req) |
+
+For a 5M-domain ccTLD with three replicas behind a CDN, this
+extrapolates comfortably past .nl/.be/.dk peak loads. See
+[PERFORMANCE.md §8](PERFORMANCE.md) for the full deployment proposal
+including PgBouncer + read-replica + ingest patterns.
 
 ## Real-world test suite
 

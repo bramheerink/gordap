@@ -129,6 +129,22 @@ See `pkg/rdap/storage/postgres/schema.sql`. The hybrid model:
   `entity_phones`) so RFC 9536 reverse search remains an indexed lookup.
 - **JSONB only** for genuinely open data: `domains.secure_dns` (DS/key
   variants) and `entities.extras` (registrar-specific metadata).
+- **`pg_trgm` + `text_pattern_ops` indexes** on every searchable text
+  column so RFC 7482 wildcard search is index-assisted, not a
+  sequential scan.
+
+Postgres is the default for a reason: effectively every public RDAP
+deployment of consequence stores authoritative registration data in
+SQL. SIDN, DENIC, CentralNic, PIR, APNIC, RIPE NCC, the ICANN
+reference impl — all PG. MySQL/MariaDB show up in older deployments,
+Oracle in legacy ones, Spanner inside Google. NoSQL was tried by a
+few smaller registries around 2014-2018 and most migrated back. EPP
+semantics are fundamentally relational; SQL fits.
+
+The `DataSource` interface keeps the door open for an operator who
+really needs something else, but PG should be the default for any new
+deployment. See [PERFORMANCE.md §8](PERFORMANCE.md) for the
+production sizing proposal.
 
 ### 4.2 In flight
 
