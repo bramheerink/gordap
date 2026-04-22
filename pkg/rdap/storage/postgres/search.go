@@ -10,7 +10,7 @@ import (
 	"github.com/bramheerink/gordap/pkg/rdap/search"
 )
 
-// Postgres search uses ILIKE with the standard `%` wildcard. For big
+// Postgres search uses LIKE with the standard `%` wildcard. For big
 // registries (>1M rows) operators should:
 //
 //	CREATE EXTENSION IF NOT EXISTS pg_trgm;
@@ -18,11 +18,11 @@ import (
 //	CREATE INDEX entities_fullname_trgm ON entities USING gin (full_name gin_trgm_ops);
 //	CREATE INDEX entity_emails_email_trgm ON entity_emails USING gin (email gin_trgm_ops);
 //
-// With those indexes ILIKE queries stay sub-100ms up to ~100M rows.
+// With those indexes LIKE queries stay sub-100ms up to ~100M rows.
 // Larger deployments belong on OpenSearch (see PERFORMANCE.md).
 
 // ilikePattern turns an RFC 7482 partial-match pattern ("example.*")
-// into a Postgres ILIKE pattern ("example.%") and escapes embedded
+// into a Postgres LIKE pattern ("example.%") and escapes embedded
 // wildcard metacharacters so user input can't broaden the match.
 func ilikePattern(in string) string {
 	var b strings.Builder
@@ -37,7 +37,12 @@ func ilikePattern(in string) string {
 			b.WriteRune(r)
 		}
 	}
-	return b.String()
+	// Lowercase so case-sensitive `LIKE` against the always-lowercase
+	// ldh_name / handle columns can use the text_pattern_ops B-tree
+	// for prefix matches and the gin_trgm_ops index for substring
+	// patterns. ILIKE was index-blind in our schema and forced a
+	// full sequential scan on every search request.
+	return strings.ToLower(b.String())
 }
 
 func (p *Provider) SearchDomains(ctx context.Context, q search.Query) (*search.Result[datasource.Domain], error) {
@@ -47,7 +52,7 @@ func (p *Provider) SearchDomains(ctx context.Context, q search.Query) (*search.R
 	pattern := ilikePattern(q.Terms["name"])
 	limit := search.ClampLimit(q.Limit, 50, 500)
 
-	const countQ = `SELECT count(*) FROM domains WHERE ldh_name ILIKE $1`
+	const countQ = `SELECT count(*) FROM domains WHERE ldh_name LIKE $1`
 	var total int
 	if err := p.pool.QueryRow(ctx, countQ, pattern).Scan(&total); err != nil {
 		return nil, fmt.Errorf("postgres: count domains: %w", err)
@@ -57,7 +62,7 @@ func (p *Provider) SearchDomains(ctx context.Context, q search.Query) (*search.R
 	SELECT handle, ldh_name, unicode_name, status,
 	       registered_at, expires_at, last_changed, last_rdap_update
 	  FROM domains
-	 WHERE ldh_name ILIKE $1
+	 WHERE ldh_name LIKE $1
 	 ORDER BY ldh_name
 	 LIMIT $2 OFFSET $3`
 	rows, err := p.pool.Query(ctx, selQ, pattern, limit, q.Offset)
@@ -85,16 +90,16 @@ func (p *Provider) SearchEntities(ctx context.Context, q search.Query) (*search.
 	)
 	if v, ok := q.Terms["fn"]; ok {
 		args = append(args, ilikePattern(v))
-		where = append(where, fmt.Sprintf("(e.full_name ILIKE $%d OR e.organization ILIKE $%d)", len(args), len(args)))
+		where = append(where, fmt.Sprintf("(e.full_name LIKE $%d OR e.organization LIKE $%d)", len(args), len(args)))
 	}
 	if v, ok := q.Terms["handle"]; ok {
 		args = append(args, ilikePattern(v))
-		where = append(where, fmt.Sprintf("e.handle ILIKE $%d", len(args)))
+		where = append(where, fmt.Sprintf("e.handle LIKE $%d", len(args)))
 	}
 	if v, ok := q.Terms["email"]; ok {
 		args = append(args, ilikePattern(v))
 		where = append(where,
-			fmt.Sprintf("EXISTS (SELECT 1 FROM entity_emails ee WHERE ee.entity_handle = e.handle AND ee.email ILIKE $%d)", len(args)))
+			fmt.Sprintf("EXISTS (SELECT 1 FROM entity_emails ee WHERE ee.entity_handle = e.handle AND ee.email LIKE $%d)", len(args)))
 	}
 	if v, ok := q.Terms["countryCode"]; ok {
 		args = append(args, strings.ToUpper(v))
@@ -200,7 +205,7 @@ func (p *Provider) SearchNameservers(ctx context.Context, q search.Query) (*sear
 	const q2 = `
 	SELECT handle, ldh_name, unicode_name, ipv4, ipv6,
 	       count(*) OVER() AS total_count
-	  FROM nameservers WHERE ldh_name ILIKE $1
+	  FROM nameservers WHERE ldh_name LIKE $1
 	  ORDER BY ldh_name LIMIT $2 OFFSET $3`
 	rows, err := p.pool.Query(ctx, q2, ilikePattern(pattern), limit, q.Offset)
 	if err != nil {

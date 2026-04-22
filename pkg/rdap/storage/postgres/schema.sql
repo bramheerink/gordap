@@ -13,6 +13,10 @@
 -- Apply with: psql -1 -f schema.sql
 
 CREATE EXTENSION IF NOT EXISTS citext;
+-- pg_trgm gives index-assisted substring + infix matching for the
+-- search endpoints. Without it, /domains?name=*foo* etc. fall back
+-- to sequential scans, which is the throughput cap on serious loads.
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 -- entities -------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS entities (
@@ -69,6 +73,13 @@ CREATE TABLE IF NOT EXISTS domains (
   registrar_handle  text REFERENCES entities(handle)
 );
 CREATE INDEX IF NOT EXISTS domains_registrar_idx ON domains (registrar_handle);
+-- Prefix-LIKE acceleration: `LIKE 'foo%'` becomes a range scan on
+-- this index. Required because the default B-tree on a UNIQUE column
+-- uses text_ops, which only supports `=` for non-prefix matches.
+CREATE INDEX IF NOT EXISTS domains_ldh_pattern ON domains (ldh_name text_pattern_ops);
+-- Trigram GIN: handles `%foo%`, `%foo`, `foo%` substring and infix
+-- searches via index lookup instead of seq-scan.
+CREATE INDEX IF NOT EXISTS domains_ldh_trgm ON domains USING gin (ldh_name gin_trgm_ops);
 
 -- domain_contacts ------------------------------------------------------
 CREATE TABLE IF NOT EXISTS domain_contacts (
@@ -87,6 +98,15 @@ CREATE TABLE IF NOT EXISTS nameservers (
   ipv6          inet[]
 );
 CREATE UNIQUE INDEX IF NOT EXISTS nameservers_ldh_idx ON nameservers (lower(ldh_name));
+-- Same prefix + trigram dance for nameserver search.
+CREATE INDEX IF NOT EXISTS nameservers_ldh_pattern ON nameservers (ldh_name text_pattern_ops);
+CREATE INDEX IF NOT EXISTS nameservers_ldh_trgm ON nameservers USING gin (ldh_name gin_trgm_ops);
+-- Entity full_name + organization for /entities?fn=*. citext on email
+-- already covers /entities?email=*; trigram on full_name lets fn=*
+-- bypass the seq-scan.
+CREATE INDEX IF NOT EXISTS entities_fullname_trgm ON entities USING gin (full_name gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS entities_org_trgm ON entities USING gin (organization gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS entity_emails_email_trgm ON entity_emails USING gin (email gin_trgm_ops);
 
 CREATE TABLE IF NOT EXISTS domain_nameservers (
   domain_handle     text NOT NULL REFERENCES domains(handle) ON DELETE CASCADE,
