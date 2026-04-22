@@ -34,21 +34,84 @@ func New(pool *pgxpool.Pool) *Provider { return &Provider{pool: pool} }
 // NewWithPool is the injectable constructor used by tests.
 func NewWithPool(p Pool) *Provider { return &Provider{pool: p} }
 
+// GetDomain pulls a complete domain object — including nameservers,
+// contacts, and each contact's emails + phones — in a SINGLE Postgres
+// round-trip. Nested data is shaped as JSON inside the same row, then
+// decoded on the Go side.
+//
+// The previous implementation issued 3-5 sequential round-trips per
+// cold lookup (domain row → nameservers → contacts → per-contact
+// emails + phones). On a cold workload that was the dominant
+// component of tail latency; consolidating into one query cuts the
+// round-trip count to 1 regardless of how many nameservers or
+// contacts a domain has.
+//
+// PG's JSON aggregation costs CPU but the trade is favourable on any
+// workload where network/scheduling dominates — i.e. all of them when
+// the application and the database aren't on the same NUMA node.
 func (p *Provider) GetDomain(ctx context.Context, name string) (*datasource.Domain, error) {
 	const q = `
 	SELECT d.handle, d.ldh_name, d.unicode_name, d.status,
 	       d.registered_at, d.expires_at, d.last_changed,
-	       d.last_rdap_update, d.secure_dns
+	       d.last_rdap_update, d.secure_dns,
+	       COALESCE(
+	         (SELECT json_agg(json_build_object(
+	            'handle',       n.handle,
+	            'ldh_name',     n.ldh_name,
+	            'unicode_name', n.unicode_name,
+	            'ipv4',         n.ipv4,
+	            'ipv6',         n.ipv6
+	          ) ORDER BY n.ldh_name)
+	          FROM domain_nameservers dn
+	          JOIN nameservers n ON n.handle = dn.nameserver_handle
+	          WHERE dn.domain_handle = d.handle),
+	         '[]'::json) AS nameservers,
+	       COALESCE(
+	         (SELECT json_agg(json_build_object(
+	            'handle',       e.handle,
+	            'roles',        (SELECT array_agg(DISTINCT dc2.role)
+	                               FROM domain_contacts dc2
+	                              WHERE dc2.domain_handle = d.handle
+	                                AND dc2.entity_handle = e.handle),
+	            'kind',         e.kind,
+	            'full_name',    e.full_name,
+	            'organization', e.organization,
+	            'title',        e.title,
+	            'country_code', e.country_code,
+	            'locality',     e.locality,
+	            'region',       e.region,
+	            'postal_code',  e.postal_code,
+	            'street',       e.street,
+	            'created_at',   e.created_at,
+	            'updated_at',   e.updated_at,
+	            'extras',       e.extras,
+	            'emails',       COALESCE((SELECT array_agg(ee.email::text ORDER BY ee.email)
+	                                       FROM entity_emails ee
+	                                      WHERE ee.entity_handle = e.handle),
+	                                     '{}'::text[]),
+	            'phones',       COALESCE((SELECT json_agg(json_build_object('number', ep.number, 'kinds', ep.kinds) ORDER BY ep.number)
+	                                       FROM entity_phones ep
+	                                      WHERE ep.entity_handle = e.handle),
+	                                     '[]'::json)
+	          ) ORDER BY e.handle)
+	          FROM domain_contacts dc
+	          JOIN entities e ON e.handle = dc.entity_handle
+	          WHERE dc.domain_handle = d.handle),
+	         '[]'::json) AS contacts
 	  FROM domains d
 	 WHERE d.ldh_name = lower($1)`
+
 	var (
 		d         datasource.Domain
 		expires   *time.Time
 		secureDNS []byte
+		nsJSON    []byte
+		contJSON  []byte
 	)
 	row := p.pool.QueryRow(ctx, q, name)
 	if err := row.Scan(&d.Handle, &d.LDHName, &d.UnicodeName, &d.Status,
-		&d.Registered, &expires, &d.LastChanged, &d.LastRDAPUpdate, &secureDNS); err != nil {
+		&d.Registered, &expires, &d.LastChanged, &d.LastRDAPUpdate, &secureDNS,
+		&nsJSON, &contJSON); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, datasource.ErrNotFound
 		}
@@ -62,20 +125,109 @@ func (p *Provider) GetDomain(ctx context.Context, name string) (*datasource.Doma
 			return nil, fmt.Errorf("postgres: decode secureDNS: %w", err)
 		}
 	}
-
-	ns, err := p.domainNameservers(ctx, d.Handle)
+	ns, err := decodeNameservers(nsJSON)
 	if err != nil {
 		return nil, err
 	}
 	d.Nameservers = ns
-
-	contacts, err := p.domainContacts(ctx, d.Handle)
+	contacts, err := decodeContacts(contJSON)
 	if err != nil {
 		return nil, err
 	}
 	d.Contacts = contacts
-
 	return &d, nil
+}
+
+// decodeNameservers turns the json_agg output into native types.
+func decodeNameservers(raw []byte) ([]datasource.Nameserver, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var rows []struct {
+		Handle      string   `json:"handle"`
+		LDHName     string   `json:"ldh_name"`
+		UnicodeName string   `json:"unicode_name"`
+		IPv4        []string `json:"ipv4"`
+		IPv6        []string `json:"ipv6"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, fmt.Errorf("postgres: decode nameservers JSON: %w", err)
+	}
+	out := make([]datasource.Nameserver, 0, len(rows))
+	for _, r := range rows {
+		n := datasource.Nameserver{Handle: r.Handle, LDHName: r.LDHName, UnicodeName: r.UnicodeName}
+		for _, s := range r.IPv4 {
+			if a, err := netip.ParseAddr(s); err == nil {
+				n.IPv4 = append(n.IPv4, a)
+			}
+		}
+		for _, s := range r.IPv6 {
+			if a, err := netip.ParseAddr(s); err == nil {
+				n.IPv6 = append(n.IPv6, a)
+			}
+		}
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+// decodeContacts turns the nested contact JSON (with emails + phones
+// folded in) into datasource.Contact values.
+func decodeContacts(raw []byte) ([]datasource.Contact, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var rows []struct {
+		Handle       string          `json:"handle"`
+		Roles        []string        `json:"roles"`
+		Kind         string          `json:"kind"`
+		FullName     string          `json:"full_name"`
+		Organization string          `json:"organization"`
+		Title        string          `json:"title"`
+		CountryCode  *string         `json:"country_code"`
+		Locality     string          `json:"locality"`
+		Region       string          `json:"region"`
+		PostalCode   string          `json:"postal_code"`
+		Street       []string        `json:"street"`
+		CreatedAt    time.Time       `json:"created_at"`
+		UpdatedAt    time.Time       `json:"updated_at"`
+		Extras       json.RawMessage `json:"extras"`
+		Emails       []string        `json:"emails"`
+		Phones       []struct {
+			Number string   `json:"number"`
+			Kinds  []string `json:"kinds"`
+		} `json:"phones"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, fmt.Errorf("postgres: decode contacts JSON: %w", err)
+	}
+	out := make([]datasource.Contact, 0, len(rows))
+	for _, r := range rows {
+		c := datasource.Contact{
+			Handle: r.Handle, Roles: r.Roles, Kind: r.Kind,
+			FullName: r.FullName, Organization: r.Organization, Title: r.Title,
+			Emails:    r.Emails,
+			CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+		}
+		if r.CountryCode != nil || r.Locality != "" || r.Region != "" || r.PostalCode != "" || len(r.Street) > 0 {
+			addr := &datasource.Address{
+				Locality: r.Locality, Region: r.Region,
+				PostalCode: r.PostalCode, Street: r.Street,
+			}
+			if r.CountryCode != nil {
+				addr.CountryCode = *r.CountryCode
+			}
+			c.Address = addr
+		}
+		if len(r.Extras) > 0 && string(r.Extras) != "null" {
+			_ = json.Unmarshal(r.Extras, &c.Extras)
+		}
+		for _, p := range r.Phones {
+			c.Phones = append(c.Phones, datasource.Phone{Number: p.Number, Kinds: p.Kinds})
+		}
+		out = append(out, c)
+	}
+	return out, nil
 }
 
 func (p *Provider) domainNameservers(ctx context.Context, handle string) ([]datasource.Nameserver, error) {
