@@ -9,9 +9,12 @@ registry, or pick the pieces you need — types, bootstrap registry,
 RFC 9537 redaction engine, JWKS verifier, caching layer — into an
 existing stack.
 
-- **Status:** active development; passes 22/22 real-world RFC + ICANN
-  RP2.2 conformance assertions, interoperates with
-  [openrdap/rdap](https://github.com/openrdap/rdap) CLI.
+- **Status:** active development; 23/23 real-world RFC + ICANN
+  RP2.2 conformance assertions pass, two independent validators agree
+  ([openrdap/rdap](https://github.com/openrdap/rdap) CLI +
+  [rdap-org/validator](https://github.com/rdap-org/validator.rdap.org)),
+  9 Postgres integration tests run against a real PG via testcontainers,
+  fuzz suites cover the IDN / validator / search-pattern parsers.
 - **Module:** `github.com/bramheerink/gordap`
 - **Go:** 1.26
 - **License:** MIT
@@ -58,15 +61,18 @@ The server boots in demo mode with an in-memory seed. Point
 | ICANN TIG v2.2 | ✅ CORS, HSTS, input validation, rate limiting |
 
 ### Operational
-- **10k+ QPS** on a single replica with the built-in LRU cache +
-  singleflight. See [PERFORMANCE.md](PERFORMANCE.md).
+- **22k RPS measured** on native PG, 26k on memory backend, single
+  replica, 100% correctness across 1.3M synthetic requests. See
+  [PERFORMANCE.md](PERFORMANCE.md) for the full measurement history.
 - **Zero external deps** in core — only `pgx/v5`, `otel`, `x/net/idna`.
   Prometheus/Redis/OpenSearch are opt-in adapters.
 - **Tiered access** (Anonymous / Authenticated / Privileged) with OIDC
-  JWKS verifier (stdlib-only JWT parse) and GDPR-conservative defaults.
+  JWKS verifier (stdlib-only JWT parse, with clock-skew + jti replay
+  cache) and GDPR-conservative defaults.
 - **NIS2 Art. 28 audit trail** via `audit.Logger`.
 - **Postgres-first, schema included**: typed columns for indexed fields,
-  join tables for multi-valued channels, JSONB only for genuinely open
+  join tables for multi-valued channels, `pg_trgm` + `text_pattern_ops`
+  indexes for index-assisted search, JSONB only for genuinely open
   data. [`schema.sql`](pkg/rdap/storage/postgres/schema.sql).
 
 ## Architecture
@@ -96,7 +102,13 @@ pkg/rdap/
   storage/memory/ in-memory DataSource + SearchIndex (demo / tests)
   storage/postgres/ production DataSource + SearchIndex
 cmd/gordap/       reference binary (composes the above)
+cmd/gordap-seed/  bulk Postgres seeder (pgx CopyFrom, ~50-200k rows/s)
+cmd/gordap-stress/ load + correctness validator (deterministic mismatches)
+cmd/gordap-stress-aggregate/ roll up JSON reports across N parallel runs
 internal/config/  YAML loader (binary-only)
+internal/synth/   deterministic synthetic name generators (shared across
+                  seeders + stress runner so the runner can predict what
+                  exists in the corpus and validate every response)
 ```
 
 Full data-flow diagrams, adoption patterns (same-DB / CDC / push API),
@@ -230,40 +242,26 @@ extrapolates comfortably past .nl/.be/.dk peak loads. See
 [PERFORMANCE.md §8](PERFORMANCE.md) for the full deployment proposal
 including PgBouncer + read-replica + ingest patterns.
 
-## Real-world test suite
+## Test suites
 
-`make test-realworld` boots the reference binary and runs 22
-assertions covering every core RFC + ICANN RP2.2 requirement plus an
-interop check against openrdap/rdap. Output on a working tree:
+Three layers, each runnable independently.
 
-```
---- PASS: TestRealWorld_Suite (0.57s)
-    --- PASS: RFC7480_ContentType
-    --- PASS: RFC7480_CORSOnEveryResponse
-    --- PASS: RFC7480_OPTIONSPreflight
-    --- PASS: RFC7480_406OnBadAccept
-    --- PASS: RFC9083_ObjectClassNameAndConformance
-    --- PASS: RFC9083_ErrorEnvelope
-    --- PASS: RFC9083_SelfLinkPresent
-    --- PASS: RFC9083_MandatoryEvents_IncludingDBUpdate
-    --- PASS: RFC9083_IDNNameDualForm
-    --- PASS: RFC9537_RedactedArrayShape
-    --- PASS: ICANN_RP2.2_NoticesPresent
-    --- PASS: ICANN_TIG_SecurityHeaders
-    --- PASS: RFC7480_GzipCompression
-    --- PASS: RFC7484_BootstrapDisabledByDefault
-    --- PASS: RFC8977_PagingMetadata
-    --- PASS: RFC9536_SearchPartialMatch
-    --- PASS: RFC9082_UnknownPathReturnsRDAPError
-    --- PASS: RIRSearch_rdap_bottom_Works
-    --- PASS: RIRSearch_rdap_up_NotImplemented
-    --- PASS: Versioning_HelpAdvertisesExtensions
-    --- PASS: InputValidation_RejectsPathTraversal
-    --- PASS: OpenRDAP_Interop
-```
+| Target | What it covers |
+|---|---|
+| `make test` | Unit + handler e2e tests with in-memory backend (~110 tests) |
+| `make test-race` | Same, under the race detector |
+| `make test-realworld` | Boots the reference binary and runs 23 RFC + ICANN RP2.2 assertions, plus interop with **openrdap/rdap** CLI and **rdap-org/validator** as second-opinion conformance checks |
+| `go test -tags=integration ./pkg/rdap/storage/postgres/...` | Spins up real Postgres via testcontainers, applies `schema.sql`, seeds 1k synthetic rows + IDN fixtures, then asserts both functional behaviour and that every declared index actually shows up in EXPLAIN |
+| `make test-conformance` | Runs the ICANN RDAP Conformance Tool against a booted gordap via Docker |
 
-For the full authority treatment, `make test-conformance` runs the
-ICANN RDAP Conformance Tool against a booted gordap via Docker.
+The unit suite ships fuzz targets for the parsers most exposed to
+adversarial input: `idn.Normalize`, `validate.Handle`,
+`validate.PathSegment`, `search.MatchPattern`. CI runs a 20-second
+fuzz pass on each per push.
+
+CI also enforces a coverage floor (50%), runs `gosec` with a
+documented baseline, and runs `govulncheck` against the dependency
+tree.
 
 ## Documentation
 
