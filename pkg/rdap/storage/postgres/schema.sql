@@ -88,6 +88,11 @@ CREATE TABLE IF NOT EXISTS domain_contacts (
   role          text NOT NULL,
   PRIMARY KEY (domain_handle, entity_handle, role)
 );
+-- Reverse lookup: "all domains held by registrar X" or "all domains
+-- where this contact appears". Without this index that query is a
+-- seq-scan over the whole join table.
+CREATE INDEX IF NOT EXISTS domain_contacts_entity_idx
+  ON domain_contacts (entity_handle);
 
 -- nameservers ----------------------------------------------------------
 CREATE TABLE IF NOT EXISTS nameservers (

@@ -61,6 +61,21 @@ func SeedSynthetic(s *Store, n int) {
 			Contacts:       []datasource.Contact{*entity},
 		})
 	}
+
+	// Real IDN entries: forces the storage round-trip for non-ASCII
+	// names to be exercised. Without these, an IDN bug in the
+	// provider would not surface — synth-i.tld names are pure LDH.
+	for _, idn := range synth.IDNFixtures {
+		s.PutDomain(&datasource.Domain{
+			Handle:         idn.Handle,
+			LDHName:        idn.LDH,
+			UnicodeName:    idn.Unicode,
+			Status:         []string{"active"},
+			Registered:     now,
+			LastChanged:    now,
+			LastRDAPUpdate: now,
+		})
+	}
 }
 
 func buildEntity(i int, now time.Time) *datasource.Contact {

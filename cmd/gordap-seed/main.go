@@ -219,7 +219,20 @@ func seedDomains(ctx context.Context, pool *pgxpool.Pool, n, batch int, now time
 			rows = rows[:0]
 		}
 	}
-	return flush(ctx, pool, "domains", cols, rows)
+	if err := flush(ctx, pool, "domains", cols, rows); err != nil {
+		return err
+	}
+	// Real IDN fixtures: exercises the storage round-trip for non-
+	// ASCII names. Without them, an IDN scan bug in the provider
+	// would not surface in either tests or stress runs.
+	idnRows := make([][]any, 0, len(synth.IDNFixtures))
+	for _, idn := range synth.IDNFixtures {
+		idnRows = append(idnRows, []any{
+			idn.Handle, idn.LDH, idn.Unicode,
+			[]string{"active"}, now, expires, now, now,
+		})
+	}
+	return flush(ctx, pool, "domains", cols, idnRows)
 }
 
 func seedDomainNameservers(ctx context.Context, pool *pgxpool.Pool, n, batch int) error {

@@ -212,6 +212,7 @@ func main() {
 		timeout     = flag.Duration("timeout", 5*time.Second, "per-request timeout")
 		jsonOut     = flag.Bool("json", false, "emit machine-readable JSON report")
 		warmup      = flag.Duration("warmup", 0, "warmup duration before measuring (defaults to none)")
+		dist        = flag.String("dist", "uniform", "key distribution: uniform | zipf (zipf models the long-tail of real RDAP traffic)")
 	)
 	flag.Parse()
 
@@ -219,18 +220,24 @@ func main() {
 		fmt.Fprintln(os.Stderr, "concurrency, duration and corpus must all be positive")
 		os.Exit(2)
 	}
+	switch *dist {
+	case "uniform", "zipf":
+	default:
+		fmt.Fprintln(os.Stderr, "dist must be 'uniform' or 'zipf'")
+		os.Exit(2)
+	}
 
 	// Optional warmup: send traffic but don't record.
 	if *warmup > 0 {
 		warmCtx, cancel := context.WithTimeout(context.Background(), *warmup)
-		runStress(warmCtx, *url, *concurrency, *corpus, *timeout, newStats())
+		runStress(warmCtx, *url, *concurrency, *corpus, *timeout, *dist, newStats())
 		cancel()
 	}
 
 	st := newStats()
 	ctx, cancel := context.WithTimeout(context.Background(), *duration)
 	defer cancel()
-	runStress(ctx, *url, *concurrency, *corpus, *timeout, st)
+	runStress(ctx, *url, *concurrency, *corpus, *timeout, *dist, st)
 
 	if *jsonOut {
 		emitJSON(st, *concurrency, *duration, *corpus, *url, os.Stdout)
@@ -239,7 +246,30 @@ func main() {
 	emitText(st, *concurrency, *duration, *corpus, *url, os.Stdout)
 }
 
-func runStress(ctx context.Context, base string, concurrency, corpus int, timeout time.Duration, st *stats) {
+// pickKey picks an integer in [0, corpus) using the chosen
+// distribution. "uniform" gives each key equal probability — useful
+// for finding the cold-path floor. "zipf" with alpha ~2 produces a
+// long-tail where the top ~1% of keys account for ~50% of queries,
+// matching what RDAP operators observe in production logs (a tiny
+// set of celebrity domains dominates traffic). Real cache hit ratio
+// and tail-latency numbers only show up under Zipf.
+func pickKey(r *rand.Rand, corpus int, dist string) int {
+	if dist == "zipf" {
+		// Inverse CDF: i = corpus * u^alpha, alpha=2 → strong skew.
+		u := r.Float64()
+		idx := int(float64(corpus) * (u * u))
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= corpus {
+			idx = corpus - 1
+		}
+		return idx
+	}
+	return r.IntN(corpus)
+}
+
+func runStress(ctx context.Context, base string, concurrency, corpus int, timeout time.Duration, dist string, st *stats) {
 	// Tuned Transport: default MaxIdleConnsPerHost=2 starves a 100-worker
 	// pool. Bump it so connection setup doesn't dominate the measured
 	// latency tail.
@@ -257,7 +287,7 @@ func runStress(ctx context.Context, base string, concurrency, corpus int, timeou
 			r := rand.New(rand.NewPCG(seed, seed^0xdeadbeef))
 			client := &http.Client{Timeout: timeout, Transport: transport}
 			for ctx.Err() == nil {
-				q := pickQuery(r, corpus)
+				q := pickQuery(r, corpus, dist)
 				// Detached request context: per-request deadline is the
 				// http.Client.Timeout, NOT the test-duration ctx. Otherwise
 				// every in-flight request at the moment the test ends
@@ -271,8 +301,11 @@ func runStress(ctx context.Context, base string, concurrency, corpus int, timeou
 }
 
 // pickQuery uses the cumulative-weight algorithm to choose a query
-// kind and instantiates it against the deterministic corpus.
-func pickQuery(r *rand.Rand, corpus int) query {
+// kind and instantiates it against the deterministic corpus. The
+// dist parameter controls how the integer index inside the corpus is
+// drawn — uniform for cold-path measurement, zipf for production-
+// like skew.
+func pickQuery(r *rand.Rand, corpus int, dist string) query {
 	total := 0
 	for _, m := range defaultMix {
 		total += m.weight
@@ -289,7 +322,7 @@ func pickQuery(r *rand.Rand, corpus int) query {
 
 	switch kind {
 	case kDomain:
-		i := r.IntN(corpus)
+		i := pickKey(r, corpus, dist)
 		name := synth.DomainName(i)
 		return query{
 			kind: kind, path: "/domain/" + name, wantStatus: 200,
@@ -317,7 +350,7 @@ func pickQuery(r *rand.Rand, corpus int) query {
 			},
 		}
 	case kEntity:
-		i := r.IntN(corpus)
+		i := pickKey(r, corpus, dist)
 		h := synth.EntityHandle(i)
 		return query{
 			kind: kind, path: "/entity/" + h, wantStatus: 200,

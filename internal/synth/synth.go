@@ -105,6 +105,20 @@ func NameserverForDomain(i int) int {
 	return i / 10
 }
 
+// IDNFixtures is a small fixed pool of synthetic IDN domains used by
+// the seeders to exercise the storage round-trip for non-ASCII names.
+// Real punycode pairs from RFC 3492 / IDN test vectors; both LDH and
+// Unicode forms are valid so idn.Normalize round-trips them.
+var IDNFixtures = []struct {
+	Handle, LDH, Unicode string
+}{
+	{"SYN-IDN-1", "xn--bcher-kva.example", "bücher.example"},
+	{"SYN-IDN-2", "xn--mller-kva.example", "müller.example"},
+	{"SYN-IDN-3", "xn--hxajbheg2az3al.example", "παράδειγμα.example"},
+	{"SYN-IDN-4", "xn--fiqs8s.example", "中国.example"},
+	{"SYN-IDN-5", "xn--mxaa.example", "ñ.example"},
+}
+
 // EntityForDomain returns the index of the registrant for domain i.
 // Identity mapping is fine — it gives one entity per domain in the
 // dense case but search patterns still vary by org clustering.
